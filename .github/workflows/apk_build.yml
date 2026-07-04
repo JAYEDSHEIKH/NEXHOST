@@ -17,13 +17,13 @@ env:
   JAVA_VERSION: '17'
   ANDROID_PLATFORM: 'android-36'
   ANDROID_BUILD_TOOLS: '36.0.0'
-  ANDROID_NDK_VERSION: '29.0.14206865'  # project requests this; installer will attempt to fetch it
-  GRADLE_CACHE_KEY: ${{ runner.os }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/*.gradle*', '**/settings.gradle') }}
+  ANDROID_NDK_VERSION: '29.0.14206865'  # optional; installer will attempt to fetch it
 
 jobs:
   build-apk:
     name: Build app_pojavlauncher APK
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,11 +47,11 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             .gradle
-          key: ${{ env.GRADLE_CACHE_KEY }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/*.gradle*', '**/settings.gradle') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Setup Android SDK / Tools (google-github-actions/setup-android)
+      - name: Setup Android SDK / Tools
         uses: google-github-actions/setup-android@v2
         with:
           sdk-components: |
@@ -59,10 +59,9 @@ jobs:
             platforms;${{ env.ANDROID_PLATFORM }}
             build-tools;${{ env.ANDROID_BUILD_TOOLS }}
           ndk: ${{ env.ANDROID_NDK_VERSION }}
-        # NOTE: the action accepts ndk input and will attempt to install it.
-        # If the exact NDK revision is not available for the runner, the step may still succeed without it.
+        # This action installs Android SDK components and sets ANDROID_SDK_ROOT.
 
-      - name: Accept Android SDK licenses (safety)
+      - name: Accept Android SDK licenses (non-blocking)
         run: yes | sdkmanager --licenses || true
 
       - name: Print environment (debug)
@@ -73,13 +72,13 @@ jobs:
 
       - name: Build debug APK (assembleDebug) — skip downloadAssets
         run: |
-          # We intentionally skip online asset downloads in CI (the repo build.gradle supports -PdownloadAssets)
+          # Skip repository asset downloads in CI; change to true if you want them
           ./gradlew --no-daemon :app_pojavlauncher:clean :app_pojavlauncher:assembleDebug -PdownloadAssets=false --stacktrace
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           JAVA_HOME: ${{ env.JAVA_HOME }}
 
-      - name: Collect APK artifacts
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: app-apks
