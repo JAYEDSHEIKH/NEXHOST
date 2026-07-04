@@ -36,9 +36,23 @@ public class ServerProcessManager {
     private Thread stdoutThread;
     private BufferedWriter logWriter;
     private final AtomicBoolean stoppingIntentionally = new AtomicBoolean(false);
+    private final String javaOverride; // null means auto-detect via javaPath()
 
+    /** Constructor for plain-Java (server-prototype) use — auto-detects java binary. */
     public ServerProcessManager(ServerInstance instance) {
+        this(instance, null);
+    }
+
+    /**
+     * Constructor that accepts an explicit java binary path.
+     * Use this on Android to pass the bundled JRE binary resolved by ServerForegroundService.
+     *
+     * @param instance    the server instance to manage
+     * @param javaOverride absolute path to java binary, or null to auto-detect
+     */
+    public ServerProcessManager(ServerInstance instance, String javaOverride) {
         this.instance = instance;
+        this.javaOverride = javaOverride;
     }
 
     public void addConsoleListener(ConsoleListener l) { listeners.add(l); }
@@ -122,7 +136,7 @@ public class ServerProcessManager {
 
     private List<String> buildCommand() {
         List<String> cmd = new ArrayList<>();
-        cmd.add(javaPath());
+        cmd.add(javaOverride != null ? javaOverride : javaPath());
         cmd.add("-Xms" + normaliseMemory(instance.getXms()));
         cmd.add("-Xmx" + normaliseMemory(instance.getXmx()));
         cmd.add("-XX:+UseG1GC");

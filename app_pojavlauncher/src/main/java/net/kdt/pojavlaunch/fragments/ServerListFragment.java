@@ -1,6 +1,10 @@
 package net.kdt.pojavlaunch.fragments;
 
+import android.app.ActivityManager;
 import android.app.AlertDialog;
+import android.app.ProgressDialog;
+import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -8,34 +12,36 @@ import android.view.*;
 import android.widget.*;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import net.kdt.pojavlaunch.instances.ServerInstance;
 import net.kdt.pojavlaunch.instances.ServerInstance.ServerType;
 import net.kdt.pojavlaunch.downloader.ServerJarDownloader;
-import net.kdt.pojavlaunch.lifecycle.ServerProcessManager;
+import net.kdt.pojavlaunch.services.ServerForegroundService;
 
 import java.io.File;
 import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * Fragment that lists all server instances and provides Create / Start / Stop / Console / Backup / Delete actions.
- *
- * Add to your navigation graph or activity:
- *   getSupportFragmentManager().beginTransaction()
- *       .replace(R.id.container, new ServerListFragment(), "server_list")
- *       .addToBackStack(null).commit();
+ * Fragment that lists all server instances and provides Create / Start / Stop / Console / Delete actions.
+ * Server processes are managed by ServerForegroundService so they survive UI lifecycle events.
  */
 public class ServerListFragment extends Fragment {
 
     private static final String BASE_PATH_KEY = "server_base_path";
+
+    /** Enforce max 1 running server at a time on mobile to prevent OOM. */
+    private static final int MAX_CONCURRENT_SERVERS = 1;
+
+    /** Minimum free memory (bytes) required before starting a server. */
+    private static final long MIN_FREE_MEMORY_BYTES = 256L * 1024 * 1024; // 256 MB
 
     private String basePath;
     private ListView listView;
     private Button btnCreate;
     private List<ServerInstance> instances = new ArrayList<>();
     private ServerInstanceAdapter adapter;
-    private final Map<String, ServerProcessManager> managers = new ConcurrentHashMap<>();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
@@ -51,7 +57,11 @@ public class ServerListFragment extends Fragment {
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (getArguments() != null) basePath = getArguments().getString(BASE_PATH_KEY);
-        if (basePath == null) basePath = requireContext().getFilesDir() + "/mojo-servers";
+        if (basePath == null) {
+            File extDir = requireContext().getExternalFilesDir("servers");
+            basePath = (extDir != null ? extDir : requireContext().getFilesDir()).getAbsolutePath()
+                    + "/mojo-servers";
+        }
     }
 
     @Nullable
@@ -93,6 +103,8 @@ public class ServerListFragment extends Fragment {
         });
     }
 
+    // ── Create flow ───────────────────────────────────────────────────────────────────────────
+
     private void showCreateDialog() {
         AlertDialog.Builder b = new AlertDialog.Builder(requireContext());
         b.setTitle("Create Server Instance");
@@ -106,30 +118,36 @@ public class ServerListFragment extends Fragment {
         layout.addView(etName);
 
         EditText etVersion = new EditText(requireContext());
-        etVersion.setHint("Minecraft version (e.g. 1.21.4)");
+        etVersion.setHint("Minecraft version (e.g. 1.21.4 or \"latest\")");
         layout.addView(etVersion);
 
         String[] types = {"Paper (recommended)", "Vanilla"};
-        int[] selectedType = {0};
         Spinner spinnerType = new Spinner(requireContext());
-        spinnerType.setAdapter(new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, types));
+        spinnerType.setAdapter(new ArrayAdapter<>(requireContext(),
+                android.R.layout.simple_spinner_item, types));
         layout.addView(spinnerType);
 
         EditText etXmx = new EditText(requireContext());
-        etXmx.setHint("Max memory Xmx (default: 1024M)");
+        etXmx.setHint("Max memory Xmx (default: 512M)");
         layout.addView(etXmx);
 
+        TextView eulaNote = new TextView(requireContext());
+        eulaNote.setText("By checking the box below you agree to the Minecraft EULA:\nhttps://aka.ms/MinecraftEULA");
+        eulaNote.setTextSize(12f);
+        layout.addView(eulaNote);
+
         CheckBox eulaCheck = new CheckBox(requireContext());
-        eulaCheck.setText("I accept the Minecraft EULA (https://aka.ms/MinecraftEULA)");
+        eulaCheck.setText("I accept the Minecraft EULA");
         layout.addView(eulaCheck);
 
         b.setView(layout);
         b.setPositiveButton("Create", (dlg, which) -> {
-            String name = etName.getText().toString().trim();
+            String name    = etName.getText().toString().trim();
             String version = etVersion.getText().toString().trim();
-            String xmx = etXmx.getText().toString().trim();
-            if (xmx.isEmpty()) xmx = "1024M";
-            ServerType type = selectedType[0] == 0 ? ServerType.PAPER : ServerType.VANILLA;
+            String xmx     = etXmx.getText().toString().trim();
+            if (xmx.isEmpty()) xmx = "512M";
+            ServerType type = spinnerType.getSelectedItemPosition() == 0
+                    ? ServerType.PAPER : ServerType.VANILLA;
 
             if (name.isEmpty() || version.isEmpty()) {
                 Toast.makeText(requireContext(), "Name and version are required.", Toast.LENGTH_SHORT).show();
@@ -147,16 +165,17 @@ public class ServerListFragment extends Fragment {
 
     private void createInstance(String name, String version, ServerType type, String xmx) {
         ProgressDialog pd = new ProgressDialog(requireContext());
-        pd.setTitle("Creating server...");
-        pd.setMessage("Downloading " + type.name() + " " + version);
+        pd.setTitle("Creating server\u2026");
+        pd.setMessage("Downloading " + type.name().toLowerCase() + " " + version);
         pd.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
         pd.setCancelable(false);
         pd.show();
 
+        final String finalXmx = xmx;
         executor.submit(() -> {
             try {
                 ServerInstance inst = new ServerInstance(name, basePath, type, version);
-                inst.setXmx(xmx);
+                inst.setXmx(finalXmx);
                 inst.setAcceptedEula(true);
                 inst.initDirectories();
                 inst.writeEula();
@@ -187,57 +206,60 @@ public class ServerListFragment extends Fragment {
         });
     }
 
+    // ── Start / Stop / Console ─────────────────────────────────────────────────────────────────
+
     private void startServer(ServerInstance inst) {
-        ServerProcessManager mgr = new ServerProcessManager(inst);
-        mgr.addConsoleListener(new ServerProcessManager.ConsoleListener() {
-            @Override public void onLine(String line) {}
-            @Override public void onServerStarted() {
-                uiHandler.post(() -> {
-                    Toast.makeText(requireContext(), inst.getName() + " is ready!", Toast.LENGTH_SHORT).show();
-                    adapter.notifyDataSetChanged();
-                });
-            }
-            @Override public void onServerStopped(int code) {
-                uiHandler.post(() -> adapter.notifyDataSetChanged());
-            }
-            @Override public void onCrash(int code, String tail) {
-                uiHandler.post(() -> {
-                    adapter.notifyDataSetChanged();
-                    new AlertDialog.Builder(requireContext())
-                            .setTitle("Server Crashed")
-                            .setMessage(inst.getName() + " crashed (exit " + code + "):\n" + tail)
-                            .setPositiveButton("OK", null).show();
-                });
-            }
-        });
-        managers.put(inst.getId(), mgr);
-        executor.submit(() -> {
-            try {
-                mgr.start();
-                uiHandler.post(() -> adapter.notifyDataSetChanged());
-            } catch (Exception e) {
-                uiHandler.post(() ->
-                        Toast.makeText(requireContext(), "Start failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
-            }
-        });
+        // Enforce single concurrent server limit (stream API not available below API 24)
+        int running = 0;
+        for (net.kdt.pojavlaunch.lifecycle.ServerProcessManager m
+                : ServerForegroundService.getAllManagers().values()) {
+            if (m.isRunning()) running++;
+        }
+        if (running >= MAX_CONCURRENT_SERVERS) {
+            Toast.makeText(requireContext(),
+                    "A server is already running. Stop it first.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        // Memory safety check
+        ActivityManager am = (ActivityManager) requireContext().getSystemService(Context.ACTIVITY_SERVICE);
+        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(mi);
+        if (mi.availMem < MIN_FREE_MEMORY_BYTES) {
+            new AlertDialog.Builder(requireContext())
+                    .setTitle("Low Memory Warning")
+                    .setMessage("Only " + (mi.availMem / 1024 / 1024) + " MB free. "
+                            + "Starting a Minecraft server requires at least 512 MB. "
+                            + "Close other apps and try again.")
+                    .setPositiveButton("OK", null)
+                    .show();
+            return;
+        }
+
+        Intent intent = new Intent(requireContext(), ServerForegroundService.class)
+                .setAction(ServerForegroundService.ACTION_START)
+                .putExtra(ServerForegroundService.EXTRA_INSTANCE_ID, inst.getId())
+                .putExtra(ServerForegroundService.EXTRA_BASE_PATH, basePath);
+        ContextCompat.startForegroundService(requireContext(), intent);
+
+        Toast.makeText(requireContext(), "Starting " + inst.getName() + "\u2026", Toast.LENGTH_SHORT).show();
+        adapter.notifyDataSetChanged();
+
+        // Refresh list after a short delay so status reflects the new state
+        uiHandler.postDelayed(this::refreshList, 1500);
     }
 
     private void stopServer(ServerInstance inst) {
-        ServerProcessManager mgr = managers.get(inst.getId());
-        if (mgr == null || !mgr.isRunning()) {
-            Toast.makeText(requireContext(), "Not running", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        executor.submit(() -> {
-            try { mgr.stopGraceful(); }
-            catch (Exception e) { mgr.forceStop(); }
-            uiHandler.post(() -> adapter.notifyDataSetChanged());
-        });
+        Intent intent = new Intent(requireContext(), ServerForegroundService.class)
+                .setAction(ServerForegroundService.ACTION_STOP)
+                .putExtra(ServerForegroundService.EXTRA_INSTANCE_ID, inst.getId());
+        requireContext().startService(intent);
+        Toast.makeText(requireContext(), "Stopping " + inst.getName() + "\u2026", Toast.LENGTH_SHORT).show();
+        uiHandler.postDelayed(this::refreshList, 2000);
     }
 
     private void openConsole(ServerInstance inst) {
-        ServerProcessManager mgr = managers.get(inst.getId());
-        if (mgr == null || !mgr.isRunning()) {
+        if (!ServerForegroundService.isRunning(inst.getId())) {
             Toast.makeText(requireContext(), "Server is not running", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -248,7 +270,30 @@ public class ServerListFragment extends Fragment {
                 .commit();
     }
 
-    private ServerProcessManager getManager(String id) { return managers.get(id); }
+    private void deleteInstance(ServerInstance inst) {
+        if (ServerForegroundService.isRunning(inst.getId())) {
+            Toast.makeText(requireContext(), "Stop the server before deleting.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(requireContext())
+                .setTitle("Delete " + inst.getName() + "?")
+                .setMessage("This will permanently delete all world data for this server.")
+                .setPositiveButton("Delete", (d, w) -> executor.submit(() -> {
+                    deleteDirectory(new File(inst.getPath()));
+                    uiHandler.post(this::refreshList);
+                }))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private static void deleteDirectory(File dir) {
+        if (dir == null || !dir.exists()) return;
+        File[] children = dir.listFiles();
+        if (children != null) for (File child : children) deleteDirectory(child);
+        dir.delete();
+    }
+
+    // ── Adapter ───────────────────────────────────────────────────────────────────────────────
 
     private class ServerInstanceAdapter extends BaseAdapter {
         @Override public int getCount() { return instances.size(); }
@@ -262,17 +307,16 @@ public class ServerListFragment extends Fragment {
             row.setPadding(16, 16, 16, 16);
 
             ServerInstance inst = instances.get(pos);
-            ServerProcessManager mgr = managers.get(inst.getId());
-            boolean running = mgr != null && mgr.isRunning();
+            boolean running = ServerForegroundService.isRunning(inst.getId());
 
             TextView title = new TextView(requireContext());
             title.setText(inst.getName() + " [" + inst.getServerType().name() + " " + inst.getMcVersion() + "]");
             title.setTextSize(16f);
             row.addView(title);
 
-            TextView status = new TextView(requireContext());
-            status.setText("Port: " + inst.getPort() + "  Status: " + (running ? "RUNNING" : inst.getStatus().name()));
-            row.addView(status);
+            TextView statusView = new TextView(requireContext());
+            statusView.setText("Port: " + inst.getPort() + "  Status: " + (running ? "RUNNING" : "STOPPED"));
+            row.addView(statusView);
 
             LinearLayout buttons = new LinearLayout(requireContext());
             buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -282,6 +326,11 @@ public class ServerListFragment extends Fragment {
                 btnStart.setText("Start");
                 btnStart.setOnClickListener(v -> startServer(inst));
                 buttons.addView(btnStart);
+
+                Button btnDelete = new Button(requireContext());
+                btnDelete.setText("Delete");
+                btnDelete.setOnClickListener(v -> deleteInstance(inst));
+                buttons.addView(btnDelete);
             } else {
                 Button btnStop = new Button(requireContext());
                 btnStop.setText("Stop");

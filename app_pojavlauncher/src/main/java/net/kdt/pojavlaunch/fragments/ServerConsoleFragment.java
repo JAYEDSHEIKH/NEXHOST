@@ -105,7 +105,12 @@ public class ServerConsoleFragment extends Fragment implements ServerProcessMana
     @Override
     public void onStart() {
         super.onStart();
+        // If manager was not injected via setManager(), resolve it from the running service.
+        if (manager == null && serverId != null) {
+            manager = net.kdt.pojavlaunch.services.ServerForegroundService.getManager(serverId);
+        }
         if (manager != null) manager.addConsoleListener(this);
+        if (manager == null) appendLine("[Console] Server manager not available — is the server running?");
     }
 
     @Override

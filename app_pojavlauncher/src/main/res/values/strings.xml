@@ -245,6 +245,7 @@
     <string name="notif_channel_name">General</string>
     <string name="notif_channel_id" translatable="false">channel_id</string>
     <string name="lazy_service_default_title">MJ Foreground Service</string>
+    <string name="server_notif_title">MojoLauncher Server</string>
     <string name="mcl_setting_veroption_installed">Installed</string>
     <string name="use_global_default">(Use global default)</string>
     <string name="default_control">Default controlmap</string>

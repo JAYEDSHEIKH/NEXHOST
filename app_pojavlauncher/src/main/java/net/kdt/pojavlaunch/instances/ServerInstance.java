@@ -1,7 +1,8 @@
 package net.kdt.pojavlaunch.instances;
 
+import androidx.annotation.Nullable;
+
 import java.io.*;
-import java.nio.file.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
@@ -130,6 +131,22 @@ public class ServerInstance {
         inst.acceptedEula = Boolean.parseBoolean(p.getProperty("acceptedEula", "false"));
         inst.createdAt = Long.parseLong(p.getProperty("createdAt", "0"));
         return inst;
+    }
+
+    /**
+     * Loads a single instance by its UUID from the given base path.
+     * Returns null if no matching instance is found or if loading fails.
+     */
+    public static @Nullable ServerInstance loadById(String basePath, String id) {
+        if (basePath == null || id == null) return null;
+        File base = new File(basePath);
+        if (!base.isDirectory()) return null;
+        File instanceDir = new File(base, id);
+        if (instanceDir.isDirectory() && new File(instanceDir, META_FILE).exists()) {
+            try { return loadMeta(instanceDir.getAbsolutePath()); }
+            catch (Exception e) { return null; }
+        }
+        return null;
     }
 
     public static List<ServerInstance> loadAll(String basePath) {

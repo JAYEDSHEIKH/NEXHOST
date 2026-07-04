@@ -20,6 +20,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
     <application
         android:name="net.kdt.pojavlaunch.PojavApplication"
@@ -124,6 +125,12 @@
                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
             </intent-filter>
         </provider>
+
+        <service android:name="net.kdt.pojavlaunch.services.ServerForegroundService"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a headless Minecraft server process for in-app server hosting."/>
+        </service>
 
         <service android:name="net.kdt.pojavlaunch.services.ProgressService"
             android:foregroundServiceType="dataSync"/>
