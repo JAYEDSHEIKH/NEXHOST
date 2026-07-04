@@ -2,9 +2,12 @@ name: Build APK (assembleDebug)
 
 on:
   push:
-    branches: [ main, 'feat/**' ]
+    branches:
+      - main
+      - 'feat/**'
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -15,7 +18,7 @@ env:
   ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
   ANDROID_PLATFORM: 'android-36'
   ANDROID_BUILD_TOOLS: '36.0.0'
-  ANDROID_NDK_VERSION: '29.0.14206865'  # optional; attempt to install
+  ANDROID_NDK_VERSION: '29.0.14206865'
 
 jobs:
   build-apk:
@@ -26,7 +29,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -47,45 +50,43 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Install prerequisite packages
+      - name: Install prerequisites
         run: sudo apt-get update && sudo apt-get install -y unzip wget zip
 
       - name: Install Android command-line tools
         run: |
-          echo "Installing Android command-line tools into ${ANDROID_SDK_ROOT}"
+          set -e
           mkdir -p "${ANDROID_SDK_ROOT}"
           cd "${ANDROID_SDK_ROOT}"
-          CMDLINE_ZIP=commandlinetools-linux-9477386_latest.zip
+          CMDLINE_ZIP="commandlinetools-linux-9477386_latest.zip"
           if [ ! -f "${CMDLINE_ZIP}" ]; then
             wget -q "https://dl.google.com/android/repository/${CMDLINE_ZIP}" -O "${CMDLINE_ZIP}"
           fi
           mkdir -p cmdline-tools
           unzip -q -o "${CMDLINE_ZIP}" -d cmdline-tools
-          # Ensure proper layout: cmdline-tools/latest/bin/...
           if [ -d cmdline-tools/cmdline-tools ]; then
             mkdir -p cmdline-tools/latest
             mv -f cmdline-tools/cmdline-tools/* cmdline-tools/latest/ || true
           fi
           ls -la "${ANDROID_SDK_ROOT}/cmdline-tools"
 
-      - name: Export Android SDK paths (persist for following steps)
+      - name: Export Android SDK tools to PATH
         run: |
-          echo "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "${ANDROID_SDK_ROOT}/platform-tools" >> $GITHUB_PATH
-          # Make sure ANDROID_SDK_ROOT exists on disk:
-          ls -la "${ANDROID_SDK_ROOT}" || true
-          sdkmanager --version || true
+          echo "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "${ANDROID_SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
 
-      - name: Install Android SDK components (platform-tools/platform/build-tools/ndk)
+      - name: Install Android SDK components
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
+          set -e
           export PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
           yes | sdkmanager --licenses || true
           sdkmanager --update || true
           sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" || true
-          # Try to install the requested NDK; if it fails, continue (not always necessary for debug)
           sdkmanager "ndk;${ANDROID_NDK_VERSION}" || echo "NDK ${ANDROID_NDK_VERSION} not available; continuing"
 
-      - name: Show Android SDK layout (debug)
+      - name: Show SDK layout (debug)
         run: |
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
           ls -la "${ANDROID_SDK_ROOT}" || true
@@ -93,19 +94,27 @@ jobs:
           ls -la "${ANDROID_SDK_ROOT}/build-tools" || true
           sdkmanager --list || true
 
-      - name: Build debug APK (assembleDebug) with detailed logging
+      - name: Build debug APK (assembleDebug) — save gradle log
         id: gradle_build
-        run: |
-          set -o pipefail
-          # Write gradle output to a file we can upload on failure
-          ./gradlew --no-daemon :app_pojavlauncher:clean :app_pojavlauncher:assembleDebug -PdownloadAssets=false --info --stacktrace 2>&1 | tee gradle-build.log
-          echo "GRADLE_EXIT_CODE=${PIPESTATUS[0]}" > gradle-exit-code.txt
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :app_pojavlauncher:clean :app_pojavlauncher:assembleDebug -PdownloadAssets=false --info --stacktrace 2>&1 | tee gradle-build.log
+          echo "EXIT=${PIPESTATUS[0]}" > gradle-exit-code.txt
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "Gradle build failed with exit ${PIPESTATUS[0]}"
+            exit ${PIPESTATUS[0]}
+          fi
 
-      - name: Upload gradle build log on failure
-        if: failure() || always()
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-apk
+          path: app_pojavlauncher/build/outputs/**/*.apk
+
+      - name: Upload gradle build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gradle-build-log
@@ -113,16 +122,7 @@ jobs:
             gradle-build.log
             gradle-exit-code.txt
 
-      - name: Upload APK artifact (if present)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-apk
-          path: |
-            app_pojavlauncher/build/outputs/**/*.apk
-            app_pojavlauncher/build/outputs/**/*.aab
-
-      - name: Debug: list outputs
+      - name: List outputs (debug)
         if: always()
         run: |
           echo "APK outputs directory listing:"
