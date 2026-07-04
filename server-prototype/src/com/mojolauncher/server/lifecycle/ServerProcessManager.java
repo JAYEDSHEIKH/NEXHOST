@@ -75,8 +75,14 @@ public class ServerProcessManager {
         stoppingIntentionally.set(false);
         instance.setStatus(Status.STARTING);
 
-        openLogWriter();
-        process = pb.start();
+        try {
+            openLogWriter();
+            process = pb.start();
+        } catch (IOException e) {
+            instance.setStatus(Status.STOPPED);
+            closeLogWriter();
+            throw e;
+        }
 
         stdoutThread = new Thread(this::streamOutput, "server-stdout-" + instance.getId());
         stdoutThread.setDaemon(true);
@@ -129,13 +135,32 @@ public class ServerProcessManager {
         return process != null && process.isAlive();
     }
 
+    /**
+     * Releases resources held by this manager. Call this when the instance is
+     * permanently deleted or the application is shutting down. Safe to call
+     * multiple times; any running process is force-killed first.
+     */
+    public void shutdown() {
+        forceStop();
+        executor.shutdownNow();
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────────
+
+    /**
+     * Normalises a JVM memory value: if it is all digits (no unit suffix) append "M".
+     * Silently accepts values that already carry a unit (M, G, K, etc.).
+     */
+    private static String normaliseMemory(String value) {
+        if (value != null && value.matches("\\d+")) return value + "M";
+        return value;
+    }
 
     private List<String> buildCommand(String javaPath) {
         List<String> cmd = new ArrayList<>();
         cmd.add(javaPath);
-        cmd.add("-Xms" + instance.getXms());
-        cmd.add("-Xmx" + instance.getXmx());
+        cmd.add("-Xms" + normaliseMemory(instance.getXms()));
+        cmd.add("-Xmx" + normaliseMemory(instance.getXmx()));
         cmd.add("-XX:+UseG1GC");
         cmd.add("-XX:+ParallelRefProcEnabled");
         cmd.add("-XX:MaxGCPauseMillis=200");
@@ -155,7 +180,7 @@ public class ServerProcessManager {
                 handleLine(line);
             }
         } catch (IOException e) {
-            if (process.isAlive()) {
+            if (process != null && process.isAlive()) {
                 broadcastLine("[Manager] Console read error: " + e.getMessage());
             }
         }
@@ -224,26 +249,32 @@ public class ServerProcessManager {
             logsDir.mkdirs();
             String timestamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
             File logFile = new File(logsDir, "server-" + timestamp + ".log");
-            logWriter = new BufferedWriter(new OutputStreamWriter(
-                    new FileOutputStream(logFile, true), StandardCharsets.UTF_8));
+            synchronized (this) {
+                logWriter = new BufferedWriter(new OutputStreamWriter(
+                        new FileOutputStream(logFile, true), StandardCharsets.UTF_8));
+            }
         } catch (IOException e) {
             System.err.println("[Manager] Could not open log file: " + e.getMessage());
         }
     }
 
     private void writeToLog(String line) {
-        if (logWriter == null) return;
-        try {
-            logWriter.write(line);
-            logWriter.newLine();
-            logWriter.flush();
-        } catch (IOException ignored) {}
+        synchronized (this) {
+            if (logWriter == null) return;
+            try {
+                logWriter.write(line);
+                logWriter.newLine();
+                logWriter.flush();
+            } catch (IOException ignored) {}
+        }
     }
 
     private void closeLogWriter() {
-        if (logWriter != null) {
-            try { logWriter.close(); } catch (IOException ignored) {}
-            logWriter = null;
+        synchronized (this) {
+            if (logWriter != null) {
+                try { logWriter.close(); } catch (IOException ignored) {}
+                logWriter = null;
+            }
         }
     }
 

@@ -1,0 +1,107 @@
+Short answer — I scanned the repository and the server-prototype code and I found a set of concrete problems likely causing the “many errors” and the APK compilation failures you reported. Below I list (A) the highest-impact issues you will hit when building the Android APK, (B) defects/bugs I found in the server-prototype code, and (C) reproduction commands and concrete fixes (file-level pointers) you can apply.
+
+A — High-impact issues that will break the APK build (evidence + why)
+1. Missing Android-side server classes referenced in README
+   - Evidence: app_pojavlauncher/src/main/java/net/kdt/pojavlaunch contains many packages but the README claims Android-side classes exist at:
+     - app_pojavlauncher/.../instances/ServerInstance.java
+     - app_pojavlauncher/.../downloader/ServerJarDownloader.java
+     - app_pojavlauncher/.../lifecycle/ServerProcessManager.java
+     - app_pojavlauncher/.../fragments/ServerListFragment.java
+     - app_pojavlauncher/.../fragments/ServerConsoleFragment.java
+   - Fact: those directories exist but are empty (no files found under app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances, /downloader, /lifecycle, /fragments).
+   - Why it breaks: if any Android code or layout references these classes (or you added imports/calls expecting them), the Android compilation will fail with "cannot find symbol" errors. Even if not referenced today, README is inconsistent which is a maintenance bug.
+
+2. Asset / JRE / online-jar tasks in app_pojavlauncher build can fail (network / environment assumptions)
+   - Evidence: app_pojavlauncher/build.gradle includes AssetTaskRegistrar that downloads/unzips remote assets (JRE, caciocavallo jars, etc.) during configuration (afterEvaluate). It also calls onlineJarDependency/jreRuntimeDependency.
+   - Why it breaks: building in environments without internet or blocked endpoints (or with wrong permissions) will cause Gradle configuration to fail or tasks to hang. CI/local builds may fail if those URLs or credentials are unavailable.
+
+3. Signing config / environment variable assumptions can fail certain build types
+   - Evidence: app_pojavlauncher/build.gradle uses System.getenv("UPLOAD_KEYSTORE_PASSWORD") and System.getenv("MOJOPUB_KEYSTORE_PASSWORD") for signing configs.
+   - Why it breaks: if you attempt a gplay/pubRelease build without those env vars, Gradle could fail or create an invalid signing config. (Debug builds should still work, but release workflows relying on env vars will fail.)
+
+4. Native build & external dependency assumptions
+   - Evidence: externalNativeBuild cmake path is set to src/main/jni/CMakeLists.txt, and the project includes native modules (glfw subproject).
+   - Why it breaks: if required native files/libraries or the GLFW submodule are not present or not initialised, the native build steps will fail. The root-level presence of a "glfw" link/placeholder indicates submodule or remote dependency handling that might break on a fresh clone.
+
+5. Committed keystore files and credentials in repo
+   - Evidence: app_pojavlauncher/debug.keystore, mojo_release_next.jks, mojo_upload_next.jks are present in the repo.
+   - Why it's a problem: security risk (not strictly a compilation error) — keep keystores out of repo and load keys from secure storage / CI secrets.
+
+B — Concrete defects / code issues I found in the server-prototype (file pointers + explanation)
+1. Missing Android equivalents vs. server-prototype (mismatch)
+   - Files in server-prototype implement ServerInstance, ServerJarDownloader, ServerProcessManager etc. (server-prototype/src/...).
+   - The Android app does not contain those implementations as mobile classes; the README references them but they are only present in server-prototype. This mismatch will confuse developers and cause integration problems.
+
+2. ServerProcessManager: possible memory argument formatting bug
+   - File: server-prototype/src/com/mojolauncher/server/lifecycle/ServerProcessManager.java
+   - Code: buildCommand() adds "-Xms" + instance.getXms() and "-Xmx" + instance.getXmx()
+   - Problem: If instance.getXms()/getXmx() are numeric values without units (e.g., "512" rather than "512M"), the java VM flags are invalid. You must ensure the memory values include units (M/G) before constructing the command.
+   - Fix: validate and format values (append "M" if digits-only).
+
+3. ServerProcessManager: executor never shutdown
+   - File: same as above
+   - Problem: ServerProcessManager creates an ExecutorService but never shuts it down; if many managers are created, threads may leak.
+   - Fix: provide a shutdown hook (shutdownNow) when instance is removed/stopped permanently.
+
+4. ServerProcessManager: logWriter concurrency and null-safety
+   - File: same
+   - Problems:
+     - logWriter is used from streamOutput thread; writeToLog doesn't synchronize on closing/setting logWriter, possible NPE or partial writes on race with closeLogWriter().
+     - openLogWriter swallows IOException; if it fails, you still continue without handling that state better.
+   - Fix: synchronize around logWriter or use a thread-safe logging queue, and reliably set status if log opening fails.
+
+5. Stream read exception handling uses process.isAlive() without null-check
+   - File: streamOutput catch block — if process is null (unlikely), calling process.isAlive() could NPE. Not typically triggered, but defensively check process != null.
+
+6. buildTail uses ArrayDeque with initial capacity argument but ArrayDeque does not strictly enforce size — not a bug but be explicit with logic. (Minor)
+
+7. Status transitions: start() sets Status.STARTING before openLogWriter/start process; if openLogWriter or pb.start() throws, instance may remain STARTING. (state rollback needed on exception)
+
+C — How to reproduce the APK build failure and where to look in logs
+1. Reproduce locally (standard): from repo root
+   - ./gradlew --no-daemon clean :app_pojavlauncher:assembleDebug
+   - This will show compile-time errors; capture full stacktrace with:
+     - ./gradlew :app_pojavlauncher:assembleDebug --stacktrace --info
+2. If the build fails in configuration phase (before compilation) due to asset download tasks, you will see errors during Gradle configuration: look for tasks named download* or unzip* in the logs; the AssetTaskRegistrar registration and onlineJarDependency are the likely source lines.
+3. If missing-class compile errors appear, the Java compiler output will show "error: package net.kdt.pojavlaunch.instances does not exist" or "cannot find symbol: class ServerInstance". That confirms the README ↔ code mismatch.
+4. If native build fails, look for CMake/NDK errors (cmake path or missing CMakeLists.txt).
+
+D — Concrete file-level fixes and checks (copy-paste guidance)
+1. If you want Android server classes to exist:
+   - Option A: copy/port server-prototype implementations into the Android module as Android-friendly classes:
+     - server-prototype/src/com/mojolauncher/server/model/ -> app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/ServerInstance.java
+     - server-prototype/src/com/mojolauncher/server/downloader/ -> app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/downloader/ServerJarDownloader.java
+     - server-prototype/src/com/mojolauncher/server/lifecycle/ServerProcessManager.java -> app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lifecycle/ServerProcessManager.java
+     - server-prototype console UI -> fragments/ServerConsoleFragment.java and ServerListFragment.java
+   - Option B: if you don't want Android server hosting, remove the README claims or mark feature as prototype-only to avoid confusion.
+
+2. Protect asset download tasks in build.gradle
+   - In app_pojavlauncher/build.gradle: wrap online-download tasks so they only run under a dedicated flag/CI profile or only when BUILD_WITH_ASSETS=true. Avoid failing the whole build during configuration:
+     - if (!project.hasProperty('downloadAssets') || project.property('downloadAssets') != 'true') skip registering download tasks or make them optional.
+
+3. Guard signing config usage
+   - Use safe checks: only create googlePlayBuild/publicBuild signingConfig if required env vars are present; otherwise fallback to debug signing for local builds.
+
+4. ServerProcessManager fixes (server-prototype)
+   - Validate / normalize xms/xmx values:
+     - if (xms.matches("\\d+")) xms += "M";
+   - Shutdown executor on final stop:
+     - executor.shutdownNow() in a shutdown() method.
+   - Synchronize log operations or use a dedicated logging thread/queue.
+
+5. Security: remove keystore files from repo and add instructions to use CI secrets or local keystores outside repo.
+
+E — Quick checklist of what to inspect in logs (when you run assemble)
+- Compiler error lines: missing packages/classes (points to Android-side missing classes).
+- Gradle configuration exceptions: network timeout or HTTP 403/404 when attempting to download remote assets.
+- CMake / NDK errors: missing CMakeLists.txt, missing native libraries.
+- Signing errors: "keystore password is null" or "storeFile not found" for specific build types.
+
+F — Evidence summary (what I opened)
+- Root README.md and server-prototype/README.md (server prototype present and documented).
+- app_pojavlauncher/build.gradle (asset download tasks, signing config, cmake, compile options).
+- settings.gradle (includes app_pojavlauncher and native/glfw modules).
+- server-prototype/src/com/mojolauncher/server/lifecycle/ServerProcessManager.java (reviewed full file).
+- Top-level repo listing (showed server-prototype, app_pojavlauncher, forge_installer, etc.).
+
+If you want specific patch text for any of the fixes above (for example: a small Java patch to normalize Xmx/Xms, a Gradle snippet to guard asset downloads, or simple stubs for the missing Android classes so the APK compiles), tell me which one and I’ll produce the exact code/gradle edits you can paste into the repo.

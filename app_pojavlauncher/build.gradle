@@ -66,16 +66,25 @@ android {
             keyPassword "android"
         }
         googlePlayBuild {
-            storeFile file("mojo_upload_next.jks")
-            storePassword System.getenv("UPLOAD_KEYSTORE_PASSWORD")
-            keyAlias "key0"
-            keyPassword System.getenv("UPLOAD_KEYSTORE_PASSWORD")
+            // Only configure if the signing secrets are present (CI/CD builds).
+            // Without them the block is left unconfigured so local/debug builds
+            // never fail at configuration time with a null password.
+            def uploadKp = System.getenv("UPLOAD_KEYSTORE_PASSWORD")
+            if (uploadKp) {
+                storeFile file("mojo_upload_next.jks")
+                storePassword uploadKp
+                keyAlias "key0"
+                keyPassword uploadKp
+            }
         }
         publicBuild {
-            storeFile file("mojo_release_next.jks")
-            storePassword System.getenv("MOJOPUB_KEYSTORE_PASSWORD")
-            keyAlias "key0"
-            keyPassword System.getenv("MOJOPUB_KEYSTORE_PASSWORD")
+            def pubKp = System.getenv("MOJOPUB_KEYSTORE_PASSWORD")
+            if (pubKp) {
+                storeFile file("mojo_release_next.jks")
+                storePassword pubKp
+                keyAlias "key0"
+                keyPassword pubKp
+            }
         }
     }
 

@@ -58,12 +58,19 @@ public class ServerProcessManager {
 
         stoppingIntentionally.set(false);
         instance.setStatus(Status.STARTING);
-        openLogWriter();
 
         ProcessBuilder pb = new ProcessBuilder(buildCommand());
         pb.directory(dir);
         pb.redirectErrorStream(true);
-        process = pb.start();
+
+        try {
+            openLogWriter();
+            process = pb.start();
+        } catch (IOException e) {
+            instance.setStatus(Status.STOPPED);
+            closeLogWriter();
+            throw e;
+        }
 
         stdoutThread = new Thread(this::streamOutput, "srv-out-" + instance.getId());
         stdoutThread.setDaemon(true);
@@ -105,11 +112,19 @@ public class ServerProcessManager {
 
     public boolean isRunning() { return process != null && process.isAlive(); }
 
+    /**
+     * Normalises a JVM memory value: appends "M" if the value is all digits and has no unit suffix.
+     */
+    private static String normaliseMemory(String value) {
+        if (value != null && value.matches("\\d+")) return value + "M";
+        return value;
+    }
+
     private List<String> buildCommand() {
         List<String> cmd = new ArrayList<>();
         cmd.add(javaPath());
-        cmd.add("-Xms" + instance.getXms());
-        cmd.add("-Xmx" + instance.getXmx());
+        cmd.add("-Xms" + normaliseMemory(instance.getXms()));
+        cmd.add("-Xmx" + normaliseMemory(instance.getXmx()));
         cmd.add("-XX:+UseG1GC");
         cmd.add("-XX:+ParallelRefProcEnabled");
         cmd.add("-XX:MaxGCPauseMillis=200");
@@ -139,7 +154,7 @@ public class ServerProcessManager {
                 }
             }
         } catch (IOException e) {
-            if (process.isAlive()) broadcast("[Manager] Console read error: " + e.getMessage());
+            if (process != null && process.isAlive()) broadcast("[Manager] Console read error: " + e.getMessage());
         }
     }
 
@@ -178,22 +193,28 @@ public class ServerProcessManager {
             File logsDir = new File(instance.getPath(), "logs");
             logsDir.mkdirs();
             String ts = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
-            logWriter = new BufferedWriter(new OutputStreamWriter(
-                    new FileOutputStream(new File(logsDir, "server-" + ts + ".log"), true),
-                    StandardCharsets.UTF_8));
+            synchronized (this) {
+                logWriter = new BufferedWriter(new OutputStreamWriter(
+                        new FileOutputStream(new File(logsDir, "server-" + ts + ".log"), true),
+                        StandardCharsets.UTF_8));
+            }
         } catch (IOException e) { /* logging is best-effort */ }
     }
 
     private void writeToLog(String line) {
-        if (logWriter == null) return;
-        try { logWriter.write(line); logWriter.newLine(); logWriter.flush(); }
-        catch (IOException ignored) {}
+        synchronized (this) {
+            if (logWriter == null) return;
+            try { logWriter.write(line); logWriter.newLine(); logWriter.flush(); }
+            catch (IOException ignored) {}
+        }
     }
 
     private void closeLogWriter() {
-        if (logWriter == null) return;
-        try { logWriter.close(); } catch (IOException ignored) {}
-        logWriter = null;
+        synchronized (this) {
+            if (logWriter == null) return;
+            try { logWriter.close(); } catch (IOException ignored) {}
+            logWriter = null;
+        }
     }
 
     private static String javaPath() {

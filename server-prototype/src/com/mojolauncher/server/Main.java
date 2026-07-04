@@ -246,6 +246,8 @@ public class Main {
             System.out.println("Cancelled.");
             return;
         }
+        // Shut down the manager's executor before removing it to prevent thread leaks.
+        if (mgr != null) mgr.shutdown();
         deleteRecursively(new File(inst.getPath()));
         managers.remove(inst.getId());
         System.out.println("Deleted instance: " + inst.getName());
@@ -281,10 +283,13 @@ public class Main {
 
     private void stopAll() {
         for (Map.Entry<String, ServerProcessManager> entry : managers.entrySet()) {
-            if (entry.getValue().isRunning()) {
-                try { entry.getValue().stopGraceful(); }
-                catch (Exception e) { entry.getValue().forceStop(); }
+            ServerProcessManager mgr = entry.getValue();
+            if (mgr.isRunning()) {
+                try { mgr.stopGraceful(); }
+                catch (Exception e) { mgr.forceStop(); }
             }
+            // Always shut down the executor to release threads, even if not running.
+            mgr.shutdown();
         }
     }
 
