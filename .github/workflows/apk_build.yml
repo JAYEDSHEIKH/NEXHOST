@@ -2,12 +2,9 @@ name: Build APK (assembleDebug)
 
 on:
   push:
-    branches:
-      - main
-      - 'feat/**'
+    branches: [ main, 'feat/**' ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -17,27 +14,25 @@ env:
   JAVA_VERSION: '17'
   ANDROID_PLATFORM: 'android-36'
   ANDROID_BUILD_TOOLS: '36.0.0'
-  ANDROID_NDK_VERSION: '29.0.14206865'  # optional; installer will attempt to fetch it
+  ANDROID_NDK_VERSION: '29.0.14206865' # attempted, may fall back if unavailable
 
 jobs:
   build-apk:
-    name: Build app_pojavlauncher APK
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
-          cache: 'gradle'
+          cache: gradle
 
-      - name: Ensure Gradle wrapper is executable
+      - name: Make gradle wrapper executable
         run: chmod +x ./gradlew || true
 
       - name: Cache Gradle
@@ -51,45 +46,74 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Setup Android SDK / Tools
-        uses: google-github-actions/setup-android@v2
-        with:
-          sdk-components: |
-            platform-tools
-            platforms;${{ env.ANDROID_PLATFORM }}
-            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
-          ndk: ${{ env.ANDROID_NDK_VERSION }}
-        # This action installs Android SDK components and sets ANDROID_SDK_ROOT.
-
-      - name: Accept Android SDK licenses (non-blocking)
-        run: yes | sdkmanager --licenses || true
-
-      - name: Print environment (debug)
+      - name: Install prerequisites
         run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          echo "Gradle: ./gradlew --version"
-          ./gradlew --version
+          sudo apt-get update -y
+          sudo apt-get install -y unzip wget zip
 
-      - name: Build debug APK (assembleDebug) — skip downloadAssets
-        run: |
-          # Skip repository asset downloads in CI; change to true if you want them
-          ./gradlew --no-daemon :app_pojavlauncher:clean :app_pojavlauncher:assembleDebug -PdownloadAssets=false --stacktrace
+      - name: Install Android command-line tools
         env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+        run: |
+          mkdir -p "${ANDROID_SDK_ROOT}"
+          cd "${ANDROID_SDK_ROOT}"
+          # Download commandline tools (update URL if Google changes it)
+          CMDLINE_ZIP=commandlinetools-linux-9477386_latest.zip
+          wget -q "https://dl.google.com/android/repository/${CMDLINE_ZIP}" -O "${CMDLINE_ZIP}"
+          mkdir -p cmdline-tools
+          unzip -q "${CMDLINE_ZIP}" -d cmdline-tools
+          # Move into expected layout: cmdline-tools/latest
+          if [ -d cmdline-tools/cmdline-tools ]; then
+            mkdir -p cmdline-tools/latest
+            mv cmdline-tools/cmdline-tools/* cmdline-tools/latest/ || true
+          fi
+          ls -la "${ANDROID_SDK_ROOT}/cmdline-tools"
 
-      - name: Upload APK artifacts
+      - name: Add Android SDK tools to PATH
+        env:
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+        run: |
+          echo "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "${ANDROID_SDK_ROOT}/platform-tools" >> $GITHUB_PATH
+          export PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}"
+          sdkmanager --version || true
+
+      - name: Install Android SDK components (platform-tools / platform / build-tools / ndk)
+        env:
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+        run: |
+          export PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${PATH}"
+          yes | sdkmanager --licenses || true
+          sdkmanager --update || true
+          sdkmanager "platform-tools" "platforms;${{ env.ANDROID_PLATFORM }}" "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" || true
+          # Attempt to install requested NDK version; ignore errors if unavailable.
+          sdkmanager "ndk;${{ env.ANDROID_NDK_VERSION }}" || echo "NDK ${ANDROID_NDK_VERSION} not available; continuing"
+
+      - name: Show installed SDK components (debug)
+        env:
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+        run: |
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          ls -la "${ANDROID_SDK_ROOT}"
+          ls -la "${ANDROID_SDK_ROOT}/cmdline-tools" || true
+          ls -la "${ANDROID_SDK_ROOT}/platforms" || true
+          ls -la "${ANDROID_SDK_ROOT}/build-tools" || true
+
+      - name: Build debug APK (assembleDebug) — skip asset downloads
+        env:
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+          JAVA_HOME: ${{ steps.setup-java.outputs.path || '' }}
+        run: |
+          ./gradlew --no-daemon :app_pojavlauncher:clean :app_pojavlauncher:assembleDebug -PdownloadAssets=false --stacktrace
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-apks
-          path: |
-            app_pojavlauncher/build/outputs/**/*.apk
-            app_pojavlauncher/build/outputs/**/*.aab
+          name: app-apk
+          path: app_pojavlauncher/build/outputs/**/*.apk
 
-      - name: List produced artifacts (for debugging)
+      - name: List APKs (debug)
         if: always()
         run: |
-          echo "Produced files under app_pojavlauncher/build/outputs/apk:"
-          ls -la app_pojavlauncher/build/outputs/apk || true
-          echo "All APK matches:"
-          ls -la app_pojavlauncher/build/outputs/**/*.apk || true
+          echo "APK files in build directory:"
+          ls -la app_pojavlauncher/build/outputs || true
