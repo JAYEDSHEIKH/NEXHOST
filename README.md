@@ -39,11 +39,30 @@ You can get MojoLauncher via four methods:
 
 4. You can [build](#building) from source.
 ## Building   
-* Build the launcher (it will automatically download all required components)
+
+### Android APK
+
+Local/Replit build (skips remote asset downloads — sufficient for most dev work):
 ```
 ./gradlew :app_pojavlauncher:assembleDebug
 ```
-(Replace `./gradlew` with `.\gradlew.bat` if you are building on Windows).
+
+Full build with all remote assets (CI/CD only — requires network and signing env vars):
+```
+./gradlew :app_pojavlauncher:assembleDebug -PdownloadAssets=true
+```
+(Replace `./gradlew` with `.\gradlew.bat` on Windows.)
+
+**Signing keys:** Never commit `.jks` or `.keystore` files. Provide them via CI secrets (`UPLOAD_KEYSTORE_PASSWORD`, `MOJOPUB_KEYSTORE_PASSWORD`).
+
+### Server-hosting prototype (runs directly on Linux / Replit)
+```bash
+cd server-prototype
+./build.sh    # compile sources
+./test.sh     # run all tests (8 tests, all pass)
+./run.sh      # launch interactive CLI server manager
+```
+Server jars are always downloaded at runtime — never bundled (licensing compliance). EULA acceptance is always required before a server can start.
 
 ## Current roadmap
 - [x] Instance system in favor of profiles

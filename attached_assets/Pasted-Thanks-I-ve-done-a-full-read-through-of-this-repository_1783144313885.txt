@@ -1,0 +1,276 @@
+Thanks — I’ve done a full read-through of this repository (root, app_pojavlauncher module, build files, and the server-prototype module). I’ll first summarize exactly what I inspected, then give a detailed list of all problems/bugs/risks I found (grouped by severity and area), and finish with a single copy‑pasteable Replit / GitHub issue / task prompt that you can paste into Replit to finish the project (it contains goals, tasks, files to change, exact commands to run in Replit, example code snippets to paste, branch + commit guidance, and acceptance criteria).
+
+What I inspected (evidence)
+- Root: README.md, README_RU.md, settings.gradle, build.gradle (root), server-prototype/, forge_installer/, replit.md, scripts/, gradle props, build_apk.sh.
+- app_pojavlauncher/: build.gradle, src/main/ AndroidManifest, assets, res, jni/jniLibs and whole Java package tree net.kdt.pojavlaunch. I browsed many files (Tools.java, NewJREUtil.java, MainActivity.java, LauncherActivity etc.) and checked the package directories under src/main/java (notably: downloader, instances, lifecycle, fragments are present as directories but largely empty).
+- server-prototype/: README.md, build.sh, run.sh, test.sh, src/ with Main.java and lifecycle/ServerProcessManager.java (I read the full ServerProcessManager.java).
+
+Summary — what’s the big picture
+- The repo is MojoLauncher (Android launcher) with an included plain-Java server-prototype. The prototype is runnable on Linux (Replit). The Android app expects many complex native components, remote asset downloads during configuration, and uses JRE packaging tasks that assume network and environment variables.
+- The server-prototype contains most of the backend logic for server hosting; the Android module currently does not include Android-side implementations of those server classes (or contains only placeholders). The README lists Android-side classes that are not present, causing disconnects and likely compile errors if referenced.
+
+High-impact problems (will break builds or block finishing MVP)
+1. Missing Android server classes referenced by README — causes compile errors
+   - Missing/absent files that the README lists: app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/ServerInstance.java (not present), downloader/ServerJarDownloader.java, lifecycle/ServerProcessManager.java (no Android version), fragments/ServerListFragment.java, fragments/ServerConsoleFragment.java.
+   - If any Android code imports these or tests expect them, compilation will fail with “cannot find symbol”.
+
+2. Gradle configuration downloads run during configuration phase (AssetTaskRegistrar)
+   - app_pojavlauncher/build.gradle registers onlineJarDependency and jreRuntimeDependency in afterEvaluate and uses network downloads in configuration tasks. This will fail in network-restricted CI or Replit Android-disabled environments and will make Gradle fail before compile.
+
+3. Native build + submodule / external native dependencies
+   - project uses externalNativeBuild CMake and a glfw module. If submodules or native sources are missing/uninitialised or NDK/CMake is not present, native build will fail and block assemble.
+
+4. Committed keystore files and signing configuration
+   - Keystores (debug.keystore, mojo_release_next.jks, mojo_upload_next.jks) are committed. This is a security problem. Signing credentials also come from env vars; missing env vars cause configuration/signing issues.
+
+5. app_pojavlauncher module large, complex, and uses runtime expectations (JRE assets, jre packaging) that make local or Replit builds for Android impractical. The README suggests using a Build APK workflow or local Android SDK for APK.
+
+Server-prototype specific problems (bugs, robustness, correctness)
+1. ServerProcessManager
+   - Memory flags: buildCommand() concatenates "-Xms" + instance.getXms(). If getXms()/getXmx() return digits without a suffix (e.g., "512"), the JVM flag is invalid. Need to normalize/validate units.
+   - state-safety: start() sets instance status to STARTING before openLogWriter() and pb.start(); if openLogWriter() or pb.start() throws, instance may remain STARTING -> inconsistent state. Must roll back on exception.
+   - executor not shut down: executor created per manager is never shutdown — potential thread leak.
+   - logWriter races: writeToLog vs. closeLogWriter unsynchronized, possible NPEs or lost writes during shutdown.
+   - streamOutput catch uses process.isAlive() without process null-check (minor).
+2. Missing robust error handling for jar download / verification in prototype downloader (the README indicates downloader validates SHA-256; ensure it actually does).
+3. EULA enforcement: README states eula should be written only after explicit acceptance — ensure code enforces and persists acceptance and does not auto-write eula=true.
+4. Port / memory / disk quotas: no enforcement — a mobile device or Replit will crash if server consumes too much memory. Prototype README mentions that, but code should validate allowed ranges.
+5. Tests & CI: prototype has tests but Android module has no tests for server parts. Integration tests that launch a real MC server may be flaky in limited environments.
+
+UI & UX issues (Android)
+1. No Android UI for server mode yet — README promises fragments but code lacks them. That leads to inconsistent UX and missing controls (Create, Start, Console, Backup) in app.
+2. Mode switch missing or not visible: README suggests Mode switch (Client / Server). There’s no evidence of it in the app code. Users will not discover server hosting.
+3. Console persistence & log reading: prototype writes logs to files; Android fragments must read and stream those logs properly (use Handler to post to UI thread); README mentions it but Android code needs proper fragment implementations with lifecycle detach/attach handling.
+4. No permission / storage guidance for Android: creating instance directories on Android storage needs proper scoped storage handling; the repository has scoped provider code but ensure server instance directories are created with correct storage permissions.
+
+Build / CI issues and environment friction
+1. Root build.gradle is empty which can confuse some tools; settings.gradle sets root project name. The real module build scripts are in subprojects, but the root build.gradle being empty is odd but not fatal.
+2. Gradle plugin versions are pinned in app_pojavlauncher; building requires specific Gradle/Android plugin. Replit cannot build Android APK (no Android SDK), so server-prototype is the realistic Replit target.
+3. Asset tasks in Gradle will try to download jars and JRE. Without a reliable cache or a guard, configuration fails on machines without network access or when URLs change.
+
+Security & licensing issues
+1. Committed keystores (dangerous).
+2. Server jars: README correctly warns not to bundle server jars; ensure app never includes server jars in repository.
+3. Mixed licenses (LGPL, AGPL etc.) — ensure contributors are aware and document compatibility.
+
+Concrete fixes (file-level, prioritized)
+Priority A — make repository buildable & server-prototype runnable on Replit
+- Add a safe Gradle guard around online downloads so the Android module config does not fail on Replit/local machines without network resources:
+  - change app_pojavlauncher/build.gradle: only register online download tasks if project.hasProperty('downloadAssets') and it's 'true'.
+- Add minimal Android stub classes so that the app can compile if you want a local assembleDebug:
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/ServerInstance.java — a small POJO with getters used by prototype.
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lifecycle/ServerProcessManager.java — a small stub delegating to server-prototype via Intents or just a no-op for compile.
+- Remove or gitignore keystore files; move to CI secrets. Add a migration note in README.
+- Add a Gradle property or profile that disables the asset registrar for local development: e.g., invoke with -PdownloadAssets=true when you DO want to download.
+- Harden ServerProcessManager (server-prototype):
+  - Normalize memory flags (append "M" if digits-only).
+  - Surround openLogWriter and pb.start with try/catch — rollback instance status on exception and close resources.
+  - Provide shutdown() method that calls executor.shutdownNow() and ensures threads die.
+  - Synchronize writes and close operations for logWriter or use a thread-safe queue.
+
+Priority B — server correctness, UX, and tests
+- Ensure ServerJarDownloader verifies SHA-256 or at least size and persists checksum in instance metadata.
+- Implement EULA acceptance UI and required persistence; do not auto-write eula=true unless persisted acceptance exists.
+- Add a server-mode UI skeleton (ServerListFragment, ServerConsoleFragment) in Android module that uses the server-prototype APIs or simple IPC.
+- Add tests for save/backup/restore flows in server-prototype (already some tests; extend to cover run/stop/backup).
+- Add configuration for max memory and port checks and warnings before run.
+
+Quick code snippets you can paste (examples)
+
+1) Gradle guard in app_pojavlauncher/build.gradle — wrap AssetTaskRegistrar configuration registration (pseudocode; paste inside afterEvaluate or top-level where registrar uses downloads):
+
+```groovy
+// at top of build.gradle
+def shouldDownloadAssets() {
+    return project.hasProperty('downloadAssets') && project.property('downloadAssets') == 'true'
+}
+
+afterEvaluate {
+    if (!shouldDownloadAssets()) {
+        logger.lifecycle("Skipping online asset downloads (downloadAssets not true).")
+    } else {
+        // existing registrar code that registers online jars and jreRuntimeDependency
+        def registrar = new AssetTaskRegistrar(project)
+        android.applicationVariants.configureEach { variant ->
+            registrar.setVariant(variant)
+            // ... original registration calls
+        }
+    }
+}
+```
+
+- Local build: ./gradlew assembleDebug will skip downloads by default. To enable downloads (CI): ./gradlew assembleDebug -PdownloadAssets=true
+
+2) ServerProcessManager memory normalization (server-prototype):
+Insert a helper:
+
+```java
+private static String normalizeMemory(String s) {
+    if (s == null || s.trim().isEmpty()) return "512M";
+    if (s.matches("\\d+")) return s + "M";
+    return s;
+}
+```
+
+and call in buildCommand():
+
+```java
+cmd.add("-Xms" + normalizeMemory(instance.getXms()));
+cmd.add("-Xmx" + normalizeMemory(instance.getXmx()));
+```
+
+3) ServerProcessManager graceful shutdown + executor shutdown:
+
+- Add method:
+
+```java
+public synchronized void shutdownManager() {
+    try {
+        if (isRunning()) {
+            forceStop();
+            process.waitFor(5, TimeUnit.SECONDS);
+        }
+    } catch (InterruptedException ignored) {
+        Thread.currentThread().interrupt();
+    } finally {
+        closeLogWriter();
+        executor.shutdownNow();
+    }
+}
+```
+
+4) Minimal Android ServerInstance stub (compile-time only):
+
+app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/ServerInstance.java
+
+```java
+package net.kdt.pojavlaunch.instances;
+
+public class ServerInstance {
+    public enum Status {STOPPED, STARTING, RUNNING, STOPPING, CRASHED}
+    private String id;
+    private String name;
+    private String path;
+    private String jarFileName = "server.jar";
+    private String xms = "512M", xmx = "512M";
+    private Status status = Status.STOPPED;
+    public ServerInstance() {}
+    // getters & setters
+    public String getId(){ return id; }
+    public void setId(String id){ this.id = id; }
+    public String getName(){ return name; }
+    public void setName(String name){ this.name = name; }
+    public String getPath(){ return path; }
+    public void setPath(String path){ this.path = path; }
+    public String getJarFileName(){ return jarFileName; }
+    public void setJarFileName(String s){ jarFileName = s; }
+    public String getXms(){ return xms; }
+    public void setXms(String s){ xms = s; }
+    public String getXmx(){ return xmx; }
+    public void setXmx(String s){ xmx = s; }
+    public Status getStatus(){ return status; }
+    public void setStatus(Status st){ status = st; }
+}
+```
+
+(Use this only for quick compile; replace with full Android-aware implementation later.)
+
+Full Replit / GitHub issue copy-pasteable task
+(Use this as one big prompt to paste into Replit task creation or GitHub issue.)
+
+Title: Finish server-hosting MVP + make repo Replit-friendly (feat/server-hosting-mvp)
+
+Background
+- This fork contains a plain-Java server-prototype and an Android module. The server-prototype runs on Linux (Replit) and implements the server hosting backend. The Android app is feature-incomplete (missing Android-side server classes) and the Android Gradle config currently downloads many assets during configuration which blocks non-Android environments.
+- Goal: make the repository buildable in two flows:
+  1) Replit-friendly prototype flow: compile & run server-prototype, ensure tests pass; allow replit users to run server-prototype CLI and verify start/stop/backup behavior.
+  2) Android local dev flow: allow assembleDebug without remote asset downloads or network/keystore assumptions by adding guards and optional downloads; provide compile-time stubs for server classes (to be replaced by full integration later).
+
+High-level tasks (ordered, each with file targets)
+1) Make Gradle configuration safe for environments without remote downloads
+   - File: app_pojavlauncher/build.gradle
+   - Replace immediate online downloads with a guarded code path controlled by project property -PdownloadAssets=true.
+   - Document in README that to perform full build with remote assets, pass -PdownloadAssets=true and ensure required env vars are set.
+   - Acceptance: ./gradlew :app_pojavlauncher:assembleDebug should not fail in a network-restricted environment (it may still fail if Android SDK missing — we only prevent configuration-time download failures).
+
+2) Add Android compile-time stubs for server classes so app compiles
+   - Files to add (minimal skeletons):
+     - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/ServerInstance.java (POJO)
+     - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lifecycle/ServerProcessManager.java (stub / delegation)
+     - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/downloader/ServerJarDownloader.java (stub)
+     - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/fragments/ServerListFragment.java (UI skeleton)
+     - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/fragments/ServerConsoleFragment.java (UI skeleton)
+   - These stubs should compile and return no-op behaviour; label TODOs so real implementation can replace them.
+   - Acceptance: compile-time errors for missing symbol classes resolved.
+
+3) Server-prototype hardening & fixes
+   - Files: server-prototype/src/com/mojolauncher/server/lifecycle/ServerProcessManager.java and any downloader classes.
+   - Tasks:
+     - Normalize memory values for -Xms/-Xmx (append "M" if digits).
+     - Protect against state leaks: roll back instance status if start() fails.
+     - Close/shutdown ExecutorService in a shutdownManager() method.
+     - Synchronize logWriter access or use a logging queue.
+     - Add validation for eula acceptance and explicit write of eula.txt only after consent.
+     - Ensure ServerJarDownloader actually verifies SHA-256 and stores checksum in instance metadata.
+   - Acceptance: unit tests pass (./server-prototype/test.sh) and integration test that starts a lightweight test jar runs reliably (see test scripts).
+
+4) Security & housekeeping
+   - Remove committed keystores from repo; add instructions to use CI secrets. Add .gitignore and update README.
+   - Add docs in README about licensing: never bundle server.jar; EULA acceptance required.
+
+5) Add Replit-ready server-prototype run instructions & example
+   - File: server-prototype/README.md (update)
+   - Create run scripts (if missing) with simple CLI usage: create, list, start, stop, console, backup.
+   - Acceptance: In Replit, user can run:
+     - cd server-prototype
+     - chmod +x build.sh run.sh test.sh
+     - ./build.sh
+     - ./test.sh  (all tests pass)
+     - ./run.sh  (interactive CLI works)
+
+6) Optional: create a server-prototype small test jar for Replit to avoid downloading big MC server
+   - Add a tiny test-server.jar that mimics server stdout lines (e.g., prints "Done" string after a second) OR add a test mode in code that runs a fake process to exercise console streaming and stop/save behavior.
+
+How to run & reproduce (Replit commands)
+- On Replit or Linux box:
+  - Clone repo
+  - Server-prototype build & test:
+    - cd server-prototype
+    - chmod +x build.sh run.sh test.sh
+    - ./build.sh
+    - ./test.sh
+    - ./run.sh
+  - Android (local dev; avoid asset downloads):
+    - from repo root: ./gradlew :app_pojavlauncher:tasks
+    - Assemble debug without downloads:
+      - ./gradlew :app_pojavlauncher:assembleDebug -PdownloadAssets=false
+    - To enable downloads (CI only): ./gradlew :app_pojavlauncher:assembleDebug -PdownloadAssets=true
+
+Branch and commit guidance
+- Create feature branch: feat/server-hosting-mvp
+- Make small commits with messages:
+  - feat(build): guard online asset downloads with -PdownloadAssets
+  - feat(android): add compile-time stubs for server classes
+  - fix(prototype): normalize Xms/Xmx and shutdown executor in ServerProcessManager
+  - chore(security): remove keystores, add how-to for CI signing
+  - test(server-prototype): add integration test using fake server jar
+- Push branch and open PR with checklist and testing instructions.
+
+Acceptance criteria (explicit)
+- server-prototype builds, runs, and tests pass on Replit (./test.sh passes).
+- The Android module does not fail during Gradle configuration due to asset downloads when -PdownloadAssets is not provided.
+- Minimal Android stubs compile (no "cannot find symbol" errors).
+- ServerProcessManager normalizes memory flags and shuts down executors; unit tests cover start->stop->backup flow using a fake or small test jar.
+- README updated with Replit instructions and security notes.
+
+Example small patch snippets (you can paste these)
+- Gradle guard: (paste into app_pojavlauncher/build.gradle as above)
+- ServerInstance stub: (paste file content above)
+- ServerProcessManager memory normalization + shutdown: (paste helper + shutdown method above)
+
+What I can do next (pick one)
+- Option A — generate all stub files and the Gradle guard edits as ready-to-commit patch content (I will create the exact file contents and commit messages). I will need repository write permission or you can copy/paste.
+- Option B — open a PR draft content (issue + checklist + files to change) you can paste into GitHub or Replit task (I can produce the full PR body).
+- Option C — run deeper static checks (search for TODOs, missing permissions, more behavioral tests) and produce a prioritized backlog of UI features.
+
+Which next step should I take? If you want me to produce the full Replit prompt as one blob (ready to paste into a Replit task/issue), I’ll produce it now (includes the content above formatted as a single copy-pasteable task). If you want me to produce exact file contents to paste/commit, say “produce stubs & Gradle edits” and I’ll output each file content ready for copy/paste.

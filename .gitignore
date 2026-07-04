@@ -10,3 +10,7 @@ app_pojavlauncher/.cxx/
 .vs/
 /curseforge_key.txt
 /app_pojavlauncher/libs/ltw-release.aar
+
+# Signing keystores — never commit; provide via CI secrets
+app_pojavlauncher/*.jks
+app_pojavlauncher/*.keystore
