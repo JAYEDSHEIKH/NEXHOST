@@ -58,6 +58,9 @@ public class ServerProcessManager {
     public void addConsoleListener(ConsoleListener l) { listeners.add(l); }
     public void removeConsoleListener(ConsoleListener l) { listeners.remove(l); }
 
+    /** Returns the server instance this manager is responsible for. */
+    public ServerInstance getServerInstance() { return instance; }
+
     /** Starts the server process. Non-blocking — output is streamed asynchronously. */
     public synchronized void start() throws IOException {
         if (process != null && process.isAlive())

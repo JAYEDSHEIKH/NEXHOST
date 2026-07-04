@@ -21,6 +21,7 @@ import git.artdeell.mojo.R;
 import net.kdt.pojavlaunch.Tools;
 import net.kdt.pojavlaunch.instances.ServerInstance;
 import net.kdt.pojavlaunch.lifecycle.ServerProcessManager;
+import net.kdt.pojavlaunch.utils.FileUtils;
 import net.kdt.pojavlaunch.utils.NotificationUtils;
 
 import java.util.Collections;
@@ -178,6 +179,18 @@ public class ServerForegroundService extends Service {
         ServerProcessManager mgr = sManagers.get(id);
         if (mgr == null) return;
         mExecutor.submit(() -> {
+            // Snapshot backup before stopping so the world is in a consistent state.
+            ServerInstance inst = mgr.getServerInstance();
+            try {
+                java.io.File backup = FileUtils.zipWorldBackup(new java.io.File(inst.getPath()));
+                if (backup != null) {
+                    Log.i(TAG, "World backup created: " + backup.getAbsolutePath());
+                } else {
+                    Log.i(TAG, "No world folder found for " + inst.getName() + " — skipping backup");
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Backup failed for " + inst.getName() + " — continuing stop anyway", e);
+            }
             try { mgr.stopGraceful(); }
             catch (Exception e) { mgr.forceStop(); }
         });
