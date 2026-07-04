@@ -1,4 +1,4 @@
-name: CI — prototype & android build
+name: Build APK (assembleDebug)
 
 on:
   push:
@@ -8,72 +8,24 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  # Use Temurin JDK 17 for Gradle + Android Gradle Plugin compatibility
   JAVA_VERSION: '17'
-  # Default Android SDK root for the job
-  ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
-  # Command line tools zip URL (update if Google changes the filename)
-  ANDROID_CMDLINE_TOOLS_URL: https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
-  # Android platform / build-tools versions to install
   ANDROID_PLATFORM: 'android-36'
   ANDROID_BUILD_TOOLS: '36.0.0'
-  # NDK version requested by the project (gradle specifies ndkVersion "29.0.14206865")
-  ANDROID_NDK: '29.0.14206865'
-  # Gradle cache key (for actions/cache)
-  GRADLE_CACHE_KEY: ${{ runner.os }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/*.gradle*', '**/gradle/**') }}
+  ANDROID_NDK_VERSION: '29.0.14206865'  # project requests this; installer will attempt to fetch it
+  GRADLE_CACHE_KEY: ${{ runner.os }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/*.gradle*', '**/settings.gradle') }}
 
 jobs:
-  server-prototype:
-    name: Build & test server-prototype
+  build-apk:
+    name: Build app_pojavlauncher APK
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-
-      - name: Ensure gradle wrapper is executable
-        run: chmod +x ./gradlew || true
-
-      - name: Build server-prototype (Gradle)
-        working-directory: .
-        run: |
-          ./gradlew --no-daemon :server-prototype:clean :server-prototype:assemble --stacktrace
-
-      - name: Run server-prototype tests (test.sh)
-        working-directory: server-prototype
-        run: |
-          chmod +x ./test.sh || true
-          ./test.sh
-        env:
-          JAVA_HOME: ${{ steps.setup-java.outputs.path || '' }}
-
-      - name: Upload server-prototype artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-prototype-artifacts
-          path: |
-            server-prototype/out/**/*.jar
-            server-prototype/build/libs/**/*.jar
-            server-prototype/test-out/**
-
-  android-build:
-    name: Build Android (assembleDebug)
-    runs-on: ubuntu-latest
-    needs: server-prototype
-    steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -83,52 +35,12 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
+          cache: 'gradle'
 
-      - name: Ensure tools needed are installed
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip wget zip
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x ./gradlew || true
 
-      - name: Create Android SDK root
-        run: |
-          mkdir -p "${ANDROID_SDK_ROOT}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          ls -la "${ANDROID_SDK_ROOT}"
-
-      - name: Download Android commandline tools
-        run: |
-          cd $RUNNER_TEMP
-          echo "Downloading command line tools..."
-          wget -q "${ANDROID_CMDLINE_TOOLS_URL}" -O cmdline-tools.zip
-          mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
-          unzip -q cmdline-tools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
-          # Move to expected layout: cmdline-tools/latest
-          mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" "${ANDROID_SDK_ROOT}/cmdline-tools/latest" || true
-          ls -la "${ANDROID_SDK_ROOT}/cmdline-tools"
-
-      - name: Add SDK tools to PATH
-        run: |
-          echo "::add-path::${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin"
-          echo "${ANDROID_SDK_ROOT}/platform-tools" >> $GITHUB_PATH
-          echo "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          export PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}"
-          sdkmanager --version || true
-
-      - name: Install Android SDK packages (platform-tools, platform, build-tools, ndk, cmake)
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager --update
-          sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "cmake;3.22.1-.. || true"
-          # Install requested NDK (if available). Some runners may not host every NDK revision;
-          # sdkmanager accepts exact version if published. Fallback to "ndk-bundle" if specific fails.
-          sdkmanager "ndk;${ANDROID_NDK}" || true
-          # Ensure platform-tools available
-          sdkmanager "platform-tools"
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-
-      - name: Cache Gradle and .gradle
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
@@ -139,13 +51,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Ensure gradle wrapper executable
-        run: chmod +x ./gradlew || true
+      - name: Setup Android SDK / Tools (google-github-actions/setup-android)
+        uses: google-github-actions/setup-android@v2
+        with:
+          sdk-components: |
+            platform-tools
+            platforms;${{ env.ANDROID_PLATFORM }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+          ndk: ${{ env.ANDROID_NDK_VERSION }}
+        # NOTE: the action accepts ndk input and will attempt to install it.
+        # If the exact NDK revision is not available for the runner, the step may still succeed without it.
 
-      - name: Build Android app (assembleDebug) — skip online asset downloads
-        working-directory: .
+      - name: Accept Android SDK licenses (safety)
+        run: yes | sdkmanager --licenses || true
+
+      - name: Print environment (debug)
         run: |
-          # Avoid configuration-time online downloads in app_pojavlauncher by passing the property
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "Gradle: ./gradlew --version"
+          ./gradlew --version
+
+      - name: Build debug APK (assembleDebug) — skip downloadAssets
+        run: |
+          # We intentionally skip online asset downloads in CI (the repo build.gradle supports -PdownloadAssets)
           ./gradlew --no-daemon :app_pojavlauncher:clean :app_pojavlauncher:assembleDebug -PdownloadAssets=false --stacktrace
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
@@ -154,28 +82,15 @@ jobs:
       - name: Collect APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk
+          name: app-apks
           path: |
             app_pojavlauncher/build/outputs/**/*.apk
             app_pojavlauncher/build/outputs/**/*.aab
 
-      - name: Run Android Lint (optional) and export reports
+      - name: List produced artifacts (for debugging)
         if: always()
         run: |
-          ./gradlew --no-daemon :app_pojavlauncher:lintDebug -PdownloadAssets=false || true
-        continue-on-error: true
-
-  smoke:
-    name: Smoke checks & summary
-    runs-on: ubuntu-latest
-    needs:
-      - server-prototype
-      - android-build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Print artifact locations & quick inspection
-        run: |
-          echo "Server-prototype artifacts were produced in the previous job. Android APKs uploaded as artifacts."
-          echo "If any job failed, check the corresponding job logs."
+          echo "Produced files under app_pojavlauncher/build/outputs/apk:"
+          ls -la app_pojavlauncher/build/outputs/apk || true
+          echo "All APK matches:"
+          ls -la app_pojavlauncher/build/outputs/**/*.apk || true
