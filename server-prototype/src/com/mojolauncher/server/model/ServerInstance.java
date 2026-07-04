@@ -143,6 +143,7 @@ public class ServerInstance {
     public String getPath() { return path; }
     public ServerType getServerType() { return serverType; }
     public String getMcVersion() { return mcVersion; }
+    public void setMcVersion(String mcVersion) { this.mcVersion = mcVersion; }
     public String getJarFileName() { return jarFileName; }
     public void setJarFileName(String jarFileName) { this.jarFileName = jarFileName; }
     public int getPort() { return port; }

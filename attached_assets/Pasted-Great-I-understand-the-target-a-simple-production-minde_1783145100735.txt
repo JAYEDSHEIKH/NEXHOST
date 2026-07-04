@@ -1,0 +1,248 @@
+Great — I understand the target: a simple, production-minded server-hosting app UX (list of servers, create flow, pick server type/version — always download latest build, show EULA accept, run server and show console), no external DB (store everything in app storage), and a Replit-friendly development path so you can finish and test everything quickly.
+
+Below is a single, copy‑pasteable Replit / GitHub issue / task prompt that you (or a developer on Replit / CI) can use to implement the feature end-to-end. It includes background, concrete file-by-file tasks, API design for a safe, testable backend, Android UI responsibilities, code snippets you can paste, branch/commit guidance, how to test locally (Replit), and production notes (security, EULA, storage, limits). Follow it step-by-step.
+
+--- Copy-pasteable TASK PROMPT (Use as Replit task or GitHub issue)
+
+Title: Implement Server Hosting MVP — create/start/manage headless Minecraft servers (Replit-friendly + Android UI)
+
+Goal / Summary
+- Implement a minimal, production-minded "Server Hosting" mode:
+  - UI: list servers, Create button at bottom → create flow (name → type → version/auto-latest) → starts server and streams console; require explicit EULA acceptance.
+  - Backend: server-prototype exposes a small HTTP API so the Android UI can control servers reliably (this avoids Android JVM-exec complexity during early development). Server instances are stored in app storage (no external DB).
+  - Behavior: when a server is created, download the latest build for the chosen server type (Paper/Vanilla/Fabric stub), verify checksum if available, write eula.txt only after explicit acceptance, then start server with nogui and stream logs.
+- Make everything runnable on Replit (server-prototype as an HTTP service + CLI) and provide Android UI code that operates as a client to that API. This enables quick development and production-ready separation (backend manager and mobile UI).
+
+Top-level deliverables
+1. server-prototype: add a small embedded HTTP API and robust lifecycle code (download, start/stop, console, metadata in storage).
+2. Android app (app_pojavlauncher): fragments and model classes that talk to the prototype HTTP API (list/create/console).
+3. Tests & Replit README updates with how to run & validate flows.
+4. Hardening: EULA enforcement, memory checks, secure download handling, no bundling of server jars, instructions for signing & production.
+
+Branch
+- Create feature branch: feat/server-hosting-mvp
+
+Server-prototype changes (primary place to implement backend)
+- Path: server-prototype/
+- New/modified files:
+  - server-prototype/src/com/mojolauncher/server/api/ServerApi.java
+    - Implement a tiny embedded HTTP server (use com.sun.net.httpserver.HttpServer for small dependency-free server) with REST endpoints listed below.
+  - server-prototype/src/com/mojolauncher/server/model/ServerInstance.java (already exists in prototype; confirm fields below).
+  - server-prototype/src/com/mojolauncher/server/downloader/ServerJarDownloader.java (ensure PaperMC & Mojang manifest support).
+  - server-prototype/src/com/mojolauncher/server/lifecycle/ServerProcessManager.java — harden (normalize Xms/Xmx, shut down executors, synchronized logging, rollback state on errors).
+  - server-prototype/src/com/mojolauncher/server/Main.java — start the HTTP API in addition to CLI.
+  - server-prototype/README.md — update with HTTP API docs and Replit run instructions.
+  - (optional) server-prototype/src/com/mojolauncher/server/test/ — add integration test that uses embedded HTTP API to create & run a fake lightweight stub server jar.
+
+Server API design (simple, JSON over HTTP)
+- Base: GET/POST JSON on configurable port (default 8080). Documented in README.
+
+Endpoints (examples)
+- GET /api/v1/instances
+  - Response: JSON array of instances (id, name, type, version, status, path, xms, xmx, createdAt)
+- POST /api/v1/instances
+  - Request JSON:
+    { "name":"test1", "type":"paper", "version":"latest" | "1.21.4", "xms":"512M", "xmx":"512M", "acceptEula":true|false }
+  - Behavior:
+    - Create directory under serversRoot/<uuid>/
+    - Save instance metadata into instance.properties (or JSON)
+    - If acceptEula==true -> write eula.txt with "eula=true"
+    - Trigger download of server.jar (latest if version==latest)
+    - Return instance id + 202 Accepted (download may be async). Provide progress via /api/v1/instances/{id}/status or via SSE.
+- GET /api/v1/instances/{id}
+  - Return metadata + status
+- POST /api/v1/instances/{id}/start
+  - Starts server process (if jar present and eula accepted). Respond 200 on success.
+- POST /api/v1/instances/{id}/stop
+  - Sends save-all and stop commands; force-kill after timeout.
+- GET /api/v1/instances/{id}/console/stream
+  - Server-Sent Events (SSE) or chunked responses providing real-time log lines.
+- POST /api/v1/instances/{id}/console/command
+  - Body: { "command":"list" } — writes to server stdin.
+- DELETE /api/v1/instances/{id}
+  - Stops and deletes all files for instance (with confirmation).
+
+Server-prototype implementation notes
+- Implement ServerApi using com.sun.net.httpserver.HttpServer (lightweight) or Jetty if you prefer. Keep dependency minimal for Replit.
+- Store instance metadata as instance.properties JSON in each instance folder (no DB). Provide atomic write/rename to avoid corruption.
+- Downloads:
+  - For Paper: query PaperMC API v2 to find latest build URL for a version. If user passes "latest" -> pick latest stable.
+  - For Vanilla: use Mojang version manifest to find server jar URL.
+  - Always compute SHA-256 after download and store as checksum field. If provider returns hash, validate.
+  - Timeouts, retries, and partial-download resume are optional but recommended (3 attempts).
+- Processes:
+  - Build command with normalized memory: append "M" to plaintext numeric values.
+  - Use ProcessBuilder to start java path found via System.getProperty("java.home") or use "java" fallback.
+  - Ensure process working dir is instance folder.
+  - Stream console stdout/stderr via background threads; append to rolling log file and also push lines to SSE clients.
+  - When stopping: send "save-all\n", wait 2s, then "stop\n", wait up to 30s, then destroyForcibly.
+- Concurrency:
+  - Limit concurrent server starts to a safe number (configurable) to avoid resource exhaustion on small hosts.
+- Logging:
+  - Write logs into instance/logs/server-<timestamp>.log. Expose the last N lines via API and SSE for streaming.
+
+Android app changes (client side)
+- Path: app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/
+- New/modified files:
+  - instances/ServerInstance.java — model mapping to API fields.
+  - fragments/ServerListFragment.java — list UI for instances and Create button.
+  - fragments/CreateServerFragment.java (or an activity) — 3-step create flow:
+    1. Name input
+    2. Type selector (Paper, Fabric, Vanilla) and version input (default "latest" or a dropdown populated via API).
+    3. EULA accept switch + Confirm (must be accepted to create with eula=true).
+  - fragments/ServerConsoleFragment.java — streams console using SSE or WebSocket or repeated polling (OkHttp supports SSE via EventSource or websockets). Show log area and input field to send commands.
+  - services/ServerApiClient.java — OkHttp based client for API endpoints above. Provide Retrofit or simple wrapper; keep small.
+  - activities or navigation: add Server mode entry and fragment nav; add bottom-floating Create button on ServerListFragment.
+- Storage:
+  - No DB: use SharedPreferences for app-level settings; instance metadata is served by server-prototype; Android only presents the backend state. For offline or truly local-serving mode later, store instance metadata in a local JSON file (internal storage) matching the server-prototype format.
+- UI specifics:
+  - ServerListFragment: RecyclerView with cells showing server name, status badge (Stopped/Starting/Running/Crashed), small actions: Start / Stop / Console / Delete.
+  - Create flow: three screens or one dialog with a small stepper. After Submit -> call POST /instances; show a progress UI with download progress (via /instances/{id}/status) and auto-navigate to console when server started.
+  - ConsoleFragment: TextView (or RecyclerView) for lines (append-only with auto-scroll toggle), input field (EditText) and Send button; an optional "Save log" button (downloads log from server-prototype via /instances/{id}/logs).
+
+Android implementation notes
+- Network security: server-prototype will be on a host; when testing on device/emulator use http://<host-ip>:8080. For production on mobile device, you must either:
+  - Run a local embedded server inside the app (complex: JRE for Android required), or
+  - Have the mobile UI control a remote host service (this is the production-friendly architecture).
+- Use OkHttp with a short timeout and exponential retry for network requests.
+- Use lifecycle-aware components (ViewModel + LiveData) to hold server list and console stream.
+- When streaming logs, ensure UI updates are posted to main thread.
+
+UX & Interaction flow
+- App opens -> Mode selector (Client / Server) in top bar. Choose Server.
+- ServerListFragment shows existing instances (from server-prototype /api/v1/instances).
+- Floating Create button at bottom:
+  - Tap → CreateServerFragment: step 1 name -> step 2 type/version -> step 3 EULA (must toggle agree) -> Submit.
+  - On Submit: POST /instances; show “Creating …” screen with progress.
+  - After download completes and instance transitions to RUNNING, open console automatically.
+- Console: shows real-time server output, input to send commands. "Stop" triggers save-all + stop; show progress and result.
+
+Security & production notes
+- Never bundle server.jar in repo or app. Always download at runtime (EULA and licensing reasons).
+- EULA: require explicit accept before either writing eula.txt or starting server. Persist user acceptance per instance in instance metadata.
+- Resource limits: on mobile devices, prevent Xmx > safe limit (validate and warn). Default Xmx=512M.
+- Network auth: if exposing server-prototype on network, secure it with a simple API token (X-API-Key) kept in app settings and in server-prototype's config; require token for API operations in production.
+- Keystore: remove any keystore files from repo and use CI secrets for signing. Add .gitignore to stop future commits.
+
+Testing & Replit instructions (repro steps)
+- On Replit (or Linux box) — setup:
+  - cd server-prototype
+  - chmod +x build.sh run.sh test.sh
+  - ./build.sh          # compile sources and tests
+  - ./test.sh           # run tests; add new tests if failing
+- Run server-prototype service (HTTP API):
+  - java -jar out/server-prototype.jar --http.port=8080 --servers.root=/home/runner/mojo-servers
+  - Or run via run.sh if it loads the correct JVM.
+- Using curl to test flow:
+  - List instances: curl http://localhost:8080/api/v1/instances
+  - Create instance: curl -X POST -H "Content-Type: application/json" -d '{"name":"test1","type":"paper","version":"latest","xms":"512M","xmx":"512M","acceptEula":true}' http://localhost:8080/api/v1/instances
+  - Check status: curl http://localhost:8080/api/v1/instances/<id>
+  - Start: curl -X POST http://localhost:8080/api/v1/instances/<id>/start
+  - Get console lines (poll): curl http://localhost:8080/api/v1/instances/<id>/console?lines=100
+  - Use SSE for real-time streaming from /console/stream.
+- Android debug:
+  - Point ServerApiClient baseUrl to your Replit host/public URL (or local machine IP if device/emulator).
+  - Build & run UI to create instance, accept EULA, and watch as server-prototype downloads and starts the server. If running on a mobile device, ensure the device can access the host (same Wi-Fi or via ngrok/port-forward).
+
+Acceptance criteria (explicit)
+- Create → download latest → start flow works end-to-end:
+  - After creation and acceptance of EULA, the chosen server jar is downloaded and stored at instance folder.
+  - Server can be started, console lines stream to UI, and Stop performs save-all then stops server and status updates.
+- No DB required; instance metadata persisted in instance folder (instance.properties or JSON).
+- Android app can list instances, create instance (with EULA), start/stop servers and view console (via HTTP API).
+- server-prototype tests pass on Replit (./test.sh).
+- README updated with run & testing instructions and with production notes (keystore, jars, EULA).
+
+File-level pointers & code snippets (ready to paste)
+1) Small embedded HTTP server (server-prototype/src/com/mojolauncher/server/api/ServerApi.java)
+- Basic idea (use com.sun.net.httpserver):
+
+```java
+// ServerApi.java (simplified snippet)
+import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpExchange;
+import java.net.InetSocketAddress;
+
+public class ServerApi {
+  private final HttpServer server;
+  public ServerApi(int port) throws IOException {
+    server = HttpServer.create(new InetSocketAddress(port), 0);
+    server.createContext("/api/v1/instances", new InstancesHandler());
+    // create others: /instances/{id}/start, /stop, /console, etc.
+    server.setExecutor(Executors.newCachedThreadPool());
+  }
+  public void start() { server.start(); }
+  public void stop() { server.stop(1); }
+  // Handlers should parse JSON via simple JSON lib (org.json) or hand-rolled parsing for brevity.
+}
+```
+
+2) Memory normalizer (ServerProcessManager change):
+
+```java
+private static String normalizeMemory(String s) {
+    if (s == null) return "512M";
+    s = s.trim().toUpperCase();
+    if (s.matches("\\d+")) return s + "M";
+    if (s.matches("\\d+[MG]")) return s;
+    // fallback
+    return "512M";
+}
+```
+
+Use this when building commands: "-Xms" + normalizeMemory(instance.getXms())
+
+3) Android ServerInstance model (app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/ServerInstance.java)
+
+```java
+package net.kdt.pojavlaunch.instances;
+
+public class ServerInstance {
+    public enum Status {STOPPED, STARTING, RUNNING, STOPPING, CRASHED}
+    private String id, name, type, version, path, jarFileName;
+    private String xms = "512M", xmx = "512M";
+    private Status status = Status.STOPPED;
+    private long createdAt;
+    // getters/setters
+}
+```
+
+4) Android API client (ServerApiClient.java) — use OkHttp or Retrofit. Example (OkHttp):
+
+```java
+OkHttpClient client = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build();
+// GET /instances
+Request r = new Request.Builder().url(baseUrl + "/api/v1/instances").build();
+Response resp = client.newCall(r).execute();
+String json = resp.body().string();
+```
+
+5) Console streaming (Android)
+- Implement an EventSource or WebSocket to /console/stream; for polling use a background coroutine or scheduled executor and fetch last N lines periodically.
+
+Testing edge cases & production hardening checklist
+- Validate disk space before download.
+- Validate memory settings against host/device available memory.
+- Graceful handling when download fails: mark instance status = ERROR and show retry option.
+- Prevent XSS/embedded HTML in server output if showing in a WebView (we'll use a TextView).
+- If exposing ServerApi externally, require an API key header.
+
+Commit messages & small commits
+- feat(server-prototype): add HTTP control API and SSE console stream
+- feat(server-prototype): implement ServerJarDownloader with PaperMC support
+- fix(server-prototype): normalize Xms/Xmx and shutdown executor in ServerProcessManager
+- feat(android): add ServerListFragment, CreateServerFragment, ServerConsoleFragment and ServerApiClient
+- chore(build): guard app asset downloads with -PdownloadAssets flag
+- docs: update README & Replit instructions
+
+Final notes & constraints
+- Running real Minecraft server jars uses lots of memory — Replit free containers may not have enough memory to run full servers. Provide a fake test-jar for CI and small-integration tests. Add "test-mode" to server-prototype that uses a tiny Java process emulating server startup and "Done (...)" messages.
+- On Android, running a JVM as a child process is nonstandard; the simplest production model is mobile UI controlling a remote host (server-prototype) which actually runs the Java server. If you want in-app server hosting on Android, you'll need the app to ship or download a compatible Android JRE (component jre) and integrate the native runtime — large and device-dependent. Start with the remote-server model, which is production-ready for managing headless game servers.
+
+Next step I can do immediately (pick one)
+- Produce the full ServerApi.java and ServerJarDownloader.java code so you can paste it into server-prototype and run on Replit.
+- Produce the Android fragment and client code (full file contents) for the UI so you can paste into app_pojavlauncher as stubs.
+- Create the branch and push the initial set of files (I need repo write permission to commit; otherwise I will output files here for you to paste).
+
+Which of the above next steps do you want me to do now? If you want I’ll generate the complete ServerApi.java and hardened ServerProcessManager implementations plus the Android client fragments as ready-to-paste files.

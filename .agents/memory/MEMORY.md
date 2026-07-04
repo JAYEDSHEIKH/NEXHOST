@@ -1,0 +1,2 @@
+- [Server prototype HTTP API](server-api.md) — embedded HTTP server via com.sun.net.httpserver; run.sh --http starts API mode on port 8080; no external JSON lib (hand-rolled JsonUtil).
+- [Build guard for asset downloads](build-guard.md) — Gradle asset downloads gated by -PdownloadAssets=true; omit flag for local/Replit builds to skip remote downloads.

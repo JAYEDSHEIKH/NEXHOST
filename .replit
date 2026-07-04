@@ -37,9 +37,18 @@ outputType = "console"
 name = "Run Server Prototype"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "bash -c 'cd server-prototype && ./run.sh'"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'cd server-prototype && ./run.sh --http --port 8080'"
+waitForPort = 8080
+
+[[ports]]
+localPort = 18080
+externalPort = 80
+
+[[ports]]
+localPort = 8080
+externalPort = 8080

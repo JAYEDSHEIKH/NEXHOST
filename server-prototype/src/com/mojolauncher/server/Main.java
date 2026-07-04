@@ -1,5 +1,6 @@
 package com.mojolauncher.server;
 
+import com.mojolauncher.server.api.ServerApi;
 import com.mojolauncher.server.backup.BackupManager;
 import com.mojolauncher.server.downloader.ServerJarDownloader;
 import com.mojolauncher.server.lifecycle.ConsoleListener;
@@ -13,12 +14,16 @@ import java.io.IOException;
 import java.util.*;
 
 /**
- * CLI entry point for the MojoLauncher server-hosting prototype.
+ * Entry point for the MojoLauncher server-hosting prototype.
  *
- * Usage:
- *   java -cp out com.mojolauncher.server.Main [instances-dir]
+ * Modes:
+ *   Interactive CLI (default):
+ *     java -cp out com.mojolauncher.server.Main [instances-dir]
  *
- * Interactive commands:
+ *   HTTP API server:
+ *     java -cp out com.mojolauncher.server.Main [instances-dir] --http [--port 8080]
+ *
+ * Interactive CLI commands:
  *   create   - Create a new server instance
  *   list     - List all instances
  *   start    - Start a server instance
@@ -42,12 +47,52 @@ public class Main {
     }
 
     public static void main(String[] args) throws Exception {
-        String base = args.length > 0 ? args[0] : DEFAULT_BASE;
+        // Parse arguments
+        String base    = DEFAULT_BASE;
+        boolean httpMode = false;
+        int     port   = 8080;
+
+        for (int i = 0; i < args.length; i++) {
+            String a = args[i];
+            if ("--http".equals(a)) {
+                httpMode = true;
+            } else if ("--port".equals(a) && i + 1 < args.length) {
+                port = Integer.parseInt(args[++i]);
+            } else if (a.startsWith("--port=")) {
+                port = Integer.parseInt(a.substring(7));
+            } else if (!a.startsWith("--")) {
+                base = a;
+            }
+        }
+
         System.out.println("MojoLauncher Server Prototype");
         System.out.println("Instance directory: " + base);
         System.out.println();
-        new Main(base).run();
+
+        if (httpMode) {
+            runHttpMode(base, port);
+        } else {
+            new Main(base).run();
+        }
     }
+
+    // ── HTTP API mode ─────────────────────────────────────────────────────────
+
+    private static void runHttpMode(String base, int port) throws Exception {
+        ServerApi api = new ServerApi(port, base);
+        api.start();
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n[API] Shutting down...");
+            api.stop();
+        }));
+
+        System.out.println("[API] Press Ctrl+C to stop.");
+        System.out.println("[API] Try: curl http://localhost:" + port + "/api/v1/instances");
+        Thread.currentThread().join(); // block until JVM shutdown
+    }
+
+    // ── Interactive CLI mode ──────────────────────────────────────────────────
 
     private void run() throws Exception {
         printHelp();
@@ -246,7 +291,6 @@ public class Main {
             System.out.println("Cancelled.");
             return;
         }
-        // Shut down the manager's executor before removing it to prevent thread leaks.
         if (mgr != null) mgr.shutdown();
         deleteRecursively(new File(inst.getPath()));
         managers.remove(inst.getId());
@@ -282,13 +326,10 @@ public class Main {
     }
 
     private void stopAll() {
-        for (Map.Entry<String, ServerProcessManager> entry : managers.entrySet()) {
-            ServerProcessManager mgr = entry.getValue();
+        for (ServerProcessManager mgr : managers.values()) {
             if (mgr.isRunning()) {
-                try { mgr.stopGraceful(); }
-                catch (Exception e) { mgr.forceStop(); }
+                try { mgr.stopGraceful(); } catch (Exception e) { mgr.forceStop(); }
             }
-            // Always shut down the executor to release threads, even if not running.
             mgr.shutdown();
         }
     }
@@ -300,5 +341,6 @@ public class Main {
 
     private void printHelp() {
         System.out.println("Commands: create | list | start | stop | console | backup | versions | delete | quit");
+        System.out.println("HTTP API: restart with --http [--port 8080]");
     }
 }
