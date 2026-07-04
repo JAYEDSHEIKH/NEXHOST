@@ -1,7 +1,9 @@
 package net.kdt.pojavlaunch.utils;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.zip.*;
 
 public class FileUtils {
     /**
@@ -82,5 +84,53 @@ public class FileUtils {
         File parentFile = targetFile.getParentFile();
         if(parentFile == null) throw new IOException("targetFile does not have a parent");
         ensureDirectory(parentFile);
+    }
+
+    /**
+     * Creates a timestamped zip archive of the world folder inside an instance directory.
+     *
+     * The output is written to {@code <instanceDir>/backups/<timestamp>.zip}.
+     * Only the {@code world/} subdirectory is zipped; all other files are ignored.
+     * If no world folder exists, this method returns null without error.
+     *
+     * @param instanceDir root directory of the server instance
+     * @return the created zip File, or null if no world folder was found
+     * @throws IOException on write failure
+     */
+    public static File zipWorldBackup(File instanceDir) throws IOException {
+        File worldDir = new File(instanceDir, "world");
+        if (!worldDir.isDirectory()) return null;
+
+        File backupsDir = new File(instanceDir, "backups");
+        backupsDir.mkdirs();
+
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
+        File zipFile = new File(backupsDir, timestamp + ".zip");
+
+        try (ZipOutputStream zos = new ZipOutputStream(
+                new BufferedOutputStream(new FileOutputStream(zipFile)))) {
+            zipDirectory(worldDir, worldDir.getName(), zos);
+        }
+        return zipFile;
+    }
+
+    private static void zipDirectory(File dir, String entryPrefix, ZipOutputStream zos)
+            throws IOException {
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            String entryName = entryPrefix + "/" + child.getName();
+            if (child.isDirectory()) {
+                zipDirectory(child, entryName, zos);
+            } else {
+                zos.putNextEntry(new ZipEntry(entryName));
+                try (InputStream in = new BufferedInputStream(new FileInputStream(child))) {
+                    byte[] buf = new byte[8192];
+                    int len;
+                    while ((len = in.read(buf)) != -1) zos.write(buf, 0, len);
+                }
+                zos.closeEntry();
+            }
+        }
     }
 }

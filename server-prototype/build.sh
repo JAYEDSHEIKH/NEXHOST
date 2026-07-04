@@ -7,6 +7,7 @@ SRC_DIR="src"
 TEST_DIR="test"
 OUT_DIR="out"
 TEST_OUT_DIR="test-out"
+FAKE_JAR="fake-server.jar"
 
 echo "=== MojoLauncher Server Prototype — Build ==="
 
@@ -22,6 +23,13 @@ echo "Compiling tests..."
 find "$TEST_DIR" -name "*.java" > /tmp/mojo_test_files.txt
 javac -cp "$OUT_DIR" -d "$TEST_OUT_DIR" @/tmp/mojo_test_files.txt
 echo "Tests compiled -> $TEST_OUT_DIR/"
+
+echo "Packaging $FAKE_JAR for lifecycle tests..."
+MANIFEST_TMP=$(mktemp)
+printf "Main-Class: com.mojolauncher.server.fakeserver.FakeServer\n\n" > "$MANIFEST_TMP"
+jar cfm "$FAKE_JAR" "$MANIFEST_TMP" -C "$TEST_OUT_DIR" com/mojolauncher/server/fakeserver/
+rm -f "$MANIFEST_TMP"
+echo "Packaged -> $FAKE_JAR"
 
 echo ""
 echo "Build successful. Run with: ./run.sh"

@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-if [ ! -d "out" ] || [ ! -d "test-out" ]; then
+if [ ! -d "out" ] || [ ! -d "test-out" ] || [ ! -f "fake-server.jar" ]; then
   echo "Building first..."
   ./build.sh
 fi
@@ -24,6 +24,7 @@ run_test() {
 
 run_test "com.mojolauncher.server.ServerInstanceTest"
 run_test "com.mojolauncher.server.BackupManagerTest"
+run_test "com.mojolauncher.server.ServerLifecycleTest"
 
 echo ""
 echo "======================================="
