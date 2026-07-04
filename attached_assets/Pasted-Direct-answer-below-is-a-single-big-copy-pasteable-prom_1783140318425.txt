@@ -1,0 +1,247 @@
+Direct answer — below is a single, big, copy-pasteable prompt you can use in Replit (or as a GitHub issue / task description / assignment) to implement server-hosting features in your fork of MojoLauncher. It contains background, goals, concrete tasks with file-level pointers, acceptance criteria, how to test locally (and Replit caveats), branch/commit guidance, and useful code snippets you can drop into the repo.
+
+Copy the whole thing and paste it into your Replit task, GitHub issue, or to an AI assistant to start work.
+
+---
+
+Title: Add "Server Hosting" mode — create, run, and manage headless Minecraft servers (prototype)
+
+Background
+- Repo: MojoLauncher (Android client launcher). Current launcher downloads Minecraft clients and launches a client JVM on Android devices.
+- Goal: Add a server-hosting mode so the app (or a prototype service) can create and run headless Minecraft server instances (vanilla/Paper), manage their lifecycle, show console logs, and perform backups. This is a prototype not a production-ready multi-tenant hosting panel. The focus is: per-instance directory, download server jar, start/stop/nogui lifecycle, console streaming, save/backup, and simple UI/commands.
+
+High-level success criteria (MVP)
+1. Create a server instance with a name and chosen server version (vanilla or Paper).
+2. Download the server jar into the instance folder and verify checksum (basic verification).
+3. Start the server process using a JVM invocation that runs the jar in nogui mode, piping stdout/stderr into the app logs.
+4. Provide a UI screen that shows the server console log in real time and accepts admin commands (send "stop" to shut down).
+5. Implement save-all before shutdown, and create a zipped backup of the world folder on stop.
+6. Store instance metadata (port, memory settings, path) in the existing instances system.
+7. Document how to run and test the prototype locally.
+
+Constraints & notes
+- MojoLauncher is Android-focused; building full Android app in Replit may be difficult due to missing Android SDK and emulation. For iterative development, you can:
+  - Implement the server-hosting backend logic in plain Java (non-Android) as a runnable prototype on Linux (works in Replit).
+  - Or modify Android code and test small logic with unit tests and mocked Process behavior in Replit; final Android testing will require an Android device or emulator locally.
+- Paper/Spigot licensing and Mojang EULA: For prototype use, download server jars at runtime (do NOT redistribute bundled server jars) and require eula=true (user acceptance). For production hosting read licensing rules first.
+
+Branching and commits
+- Create a focused feature branch:
+  - Branch name: feat/server-hosting-mvp
+- Make multiple small commits with clear messages, for example:
+  - feat(instances): add ServerInstance model and folder layout
+  - feat(downloader): add ServerJarDownloader with Paper API support
+  - feat(lifecycle): add ServerProcessManager to start/stop server jar
+  - feat(ui): add ServerListFragment and ServerConsoleFragment
+  - test: add integration test for ServerProcessManager launching jar
+  - docs: update README with server-hosting instructions
+
+Files / packages to change (exact pointers)
+- Primary code areas to implement or modify:
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/instances/
+    - Add ServerInstance class (or extend existing Instance) to hold server metadata (name, path, port, xms, xmx, jar filename, serverType)
+    - Update instance creation UI to allow creating a "Server" type instance
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/downloader/
+    - Add ServerJarDownloader.java:
+      - Support PaperMC builds API (preferred) and Vanilla jar URLs
+      - Download to instance dir, store checksum
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lifecycle/
+    - Add ServerProcessManager.java (process lifecycle and IO streaming)
+    - Modify/extend existing lifecycle code to accept server mode
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/
+    - Tools.java — add helper JVM args builder for servers (-Xms/-Xmx, GC flags)
+    - NewJREUtil.java / multirt/ — ensure JRE selection works for headless runtime (no display required)
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/fragments/ or activities/
+    - Add ServerListFragment.java — list server instances and buttons (Create, Start, Stop, Backup, Console)
+    - Add ServerConsoleFragment.java — show real-time console and input field for commands
+  - app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/services/ or tasks/
+    - Background tasks: download jar, perform backup (zip world), and perform save-all before shutdown
+  - Resources/layouts — add layouts for server list and console (in res/layout/)
+
+Detailed task breakdown (implement in order)
+
+Phase 1 — data model & directory layout
+- Implement ServerInstance model:
+  - fields: id, name, path (root folder), serverType (paper/vanilla), jarFileName, port, rconPort (optional), xms, xmx, acceptedEula (boolean), createdAt
+- When creating an instance:
+  - create directory structure:
+    - <instance_root>/
+      - server.jar
+      - server.properties  (a template)
+      - eula.txt
+      - world/ (created by server on first run or you can create a default)
+      - logs/
+      - plugins/
+  - write eula.txt with eula=true only if accepted by user and persisted in metadata (do NOT auto-write true without user consent)
+  - write a template server.properties (include server-port, motd, online-mode=true)
+
+Phase 2 — server jar downloader
+- Implement ServerJarDownloader:
+  - For Paper:
+    - Query PaperMC API: https://api.papermc.io/v2/projects/paper (list versions) and builds: https...
+    - Download build jar by URL and save as server.jar
+  - For Vanilla:
+    - Use Mojang version manifest to find server jar URL
+  - Download with progress reporting via existing downloader/task pattern in downloader/ package
+  - Save checksum (SHA1/SHA256) or at least validate size
+
+Phase 3 — Process manager (start, stop, console)
+- Create ServerProcessManager.java with these capabilities:
+  - start(ServerInstance instance):
+    - Build command:
+      - java -Xms{instance.xms} -Xmx{instance.xmx} -jar server.jar nogui
+    - Set working directory to instance.path
+    - Start process with ProcessBuilder
+    - Attach Stream gobblers for stdout and stderr; forward to app logs and the ServerConsole UI
+    - Persist process PID (if possible) to detect running state (or maintain in-memory manager)
+  - stop(ServerInstance instance):
+    - Preferred: send “stop\n” to process stdin and wait for graceful exit (timeout, then destroy)
+    - If RCON enabled, can use RCON to send "stop"
+  - onCrash:
+    - Detect non-zero exit and store last crash log, optionally auto-restart (configurable)
+- Example process start snippet (Java):
+  - (Put this in ServerProcessManager)
+    - ProcessBuilder pb = new ProcessBuilder(Arrays.asList(
+        javaPath, "-Xms" + xms, "-Xmx" + xmx, "-jar", jarName, "nogui"));
+      pb.directory(new File(instance.getPath()));
+      pb.redirectErrorStream(true);
+      Process p = pb.start();
+      // read p.getInputStream() and forward lines to console UI and log storage
+      // hold a reference to p for stop
+
+Phase 4 — Console UI and commands
+- Console view:
+  - A scrolling text view showing lines appended as they arrive.
+  - An input text + send button that writes the command to process stdin (append \n).
+- On start of server, open console UI and stream logs.
+- Persist console log to a file in logs/ for later retrieval.
+
+Phase 5 — Save and Backup
+- Before issuing stop, run server save:
+  - Write "save-all\n" to stdin or use RCON. Wait a short time.
+  - Stop server (send "stop").
+- After stop completes, create a zip of the world folder (world/ or world_nether/world_the_end) to backups/<timestamp>.zip (or store to cloud storage if desired).
+- Provide Restore: unzip backup into world folder (with server stopped).
+
+Phase 6 — Testing & integration
+- Unit tests:
+  - Downloader: simulate a small HTTP server and verify jar is downloaded and saved.
+  - Instance creation: ensure directories and files are created.
+- Integration test (non-Android prototype):
+  - A Java test that downloads a small, real server jar (or a purposely small test jar) and launches it; verify logs stream.
+- Manual test on device:
+  - If testing on Android device, ensure the device can run Java runtime used by PojavLauncher; otherwise run on Linux.
+
+UI/UX requirements
+- Add a "Mode" switch in the app: Client / Server (default Client)
+- Server List screen:
+  - Create New Server (choose version, memory, port, accepted EULA)
+  - Buttons: Start, Stop, Restart, Console, Backup, Delete
+  - Status indicator (Starting / Running / Stopped / Crashed)
+- Server Console screen:
+  - Log area (auto-scroll toggle)
+  - Input field for commands
+  - Button: Save log to file / Download backup
+
+Security & operational notes
+- Do not run servers as root. On Android, you're constrained; consider recommending server hosting on Linux containers for production.
+- Validate plugin uploads (scan for suspicious code). For MVP, disallow direct upload OR warn about risk.
+- Require explicit EULA acceptance from the user before creating a server instance.
+- Limit memory and disk usage per instance (for device/host safety).
+
+Replit-specific guidance
+- Replit environment is Linux-based — a good place to run a non-Android Java prototype:
+  - Create a plain Java module under /server-prototype/ that contains ServerProcessManager and ServerJarDownloader. This can be run and tested on Replit.
+- Building the Android app in Replit is hard; use Replit for backend/prototype and develop Android UI on your development machine or test minimal UI logic with unit tests only.
+- Commands you can run in Replit (for a Java prototype):
+  - javac -d out src/*.java
+  - java -cp out com.example.server.Main
+- For Android dev: run ./gradlew :app_pojavlauncher:assembleDebug locally or in GitHub Actions with Android SDK.
+
+Minimal Java example: ServerProcessManager (drop-in prototype)
+- Basic start/stop and console streaming skeleton:
+
+```java
+// ServerProcessManager.java (prototype)
+public class ServerProcessManager {
+  private Process process;
+  private Thread stdoutThread;
+
+  public void start(File instanceDir, String jarName, String xms, String xmx) throws IOException {
+    List<String> cmd = Arrays.asList(
+      "java", "-Xms" + xms, "-Xmx" + xmx, "-jar", jarName, "nogui"
+    );
+    ProcessBuilder pb = new ProcessBuilder(cmd);
+    pb.directory(instanceDir);
+    pb.redirectErrorStream(true);
+    process = pb.start();
+
+    InputStream in = process.getInputStream();
+    stdoutThread = new Thread(() -> {
+      try (BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+        String line;
+        while ((line = r.readLine()) != null) {
+          // forward line to log storage / UI
+          System.out.println("[SERVER] " + line);
+        }
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    });
+    stdoutThread.start();
+  }
+
+  public void sendCommand(String cmd) throws IOException {
+    if (process == null) return;
+    OutputStream os = process.getOutputStream();
+    os.write((cmd + "\n").getBytes(StandardCharsets.UTF_8));
+    os.flush();
+  }
+
+  public void stopGraceful(long timeoutMs) throws IOException, InterruptedException {
+    if (process == null) return;
+    sendCommand("save-all");
+    Thread.sleep(1000);
+    sendCommand("stop");
+    if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+      process.destroy();
+    }
+  }
+}
+```
+
+Testing checklist (manual)
+- Create instance "test1" with Paper 1.20.x and xmx=512M.
+- Ensure eula.txt exists and is true.
+- Click Start — confirm logs appear and server initializes and creates world.
+- In Console, type "list" — confirm players list appears (empty).
+- Click Stop — confirm server does save-all and shuts down normally, and backup zip is created.
+
+Deliverables for the PR
+- New branch feat/server-hosting-mvp with:
+  - ServerInstance model and persistence changes
+  - ServerJarDownloader implementation
+  - ServerProcessManager with start/stop/console
+  - UI fragments for server list and console (or minimal placeholders and debug activities)
+  - README section documenting how to create/run server instances
+  - Tests for downloader and process manager (unit/integration)
+  - Example: server-prototype directory with a plain-Java runnable Main for testing on Replit
+
+Acceptance criteria (explicit)
+- Automated test(s) or manual steps confirm start -> logs -> stop -> backup flow.
+- README updated with how to test in Replit and locally.
+- No functionality that silently accepts EULA — user must opt-in when creating an instance.
+
+Follow-up / next steps after MVP
+- Add RCON support for remote command with password management.
+- Add port management and NAT/iptables helper (or containerization).
+- Add plugin manager + compatibility checks.
+- Add snapshots/backups to cloud storage (S3/Backblaze).
+- Consider splitting into server-backend (Kotlin/Java/Go) that runs on Linux and mobile UI to control it.
+
+---
+
+If you want, I can now:
+- Turn this into a ready-made GitHub issue with the checklist and initial files to modify.
+- Generate the ServerProcessManager.java file and a small server-prototype runnable project that you can paste into Replit and run immediately to test starting a Paper/Vanilla jar (I will include a small fake server jar or explain how to use a lightweight test jar).
+Which do you want next?

@@ -1,0 +1,45 @@
+modules = ["java-graalvm22.3", "bash"]
+[agent]
+expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Build APK"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Run Server Prototype"
+
+[[workflows.workflow]]
+name = "Build APK"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash build_apk.sh"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Run Server Prototype"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'cd server-prototype && ./run.sh'"
+
+[workflows.workflow.metadata]
+outputType = "console"
